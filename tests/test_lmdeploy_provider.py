@@ -62,6 +62,13 @@ def test_lmdeploy_uses_chat_completions_and_accumulates_usage() -> None:
         "total_tokens": 18,
     }
 
+def test_lmdeploy_reads_configured_token_cap(monkeypatch) -> None:
+    monkeypatch.setenv("WORLDMM_LMDEPLOY_MAX_TOKENS", "4096")
+    client = FakeClient()
+    model = LMDEPLOY_MODULE.LMDeployModel(model_name="Qwen3.5-4B", base_url="http://127.0.0.1:23333/v1", client=client)
+    model.generate("hello")
+    assert client.requests[0]["max_tokens"] == 4096
+
 MODULE = importlib.util.module_from_spec(SPEC)
 
 sys.modules[SPEC.name] = MODULE

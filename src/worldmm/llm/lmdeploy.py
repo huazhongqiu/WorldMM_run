@@ -33,8 +33,10 @@ class LMDeployModel:
                 "Set WORLDMM_LMDEPLOY_BASE_URL, e.g. http://127.0.0.1:23333/v1"
             )
         self.api_key = api_key or os.environ.get("WORLDMM_LMDEPLOY_API_KEY", "EMPTY")
-        self.sync_client = client or OpenAI(api_key=self.api_key, base_url=self.base_url)
         self.request_options = request_options
+        if "max_tokens" not in self.request_options and os.environ.get("WORLDMM_LMDEPLOY_MAX_TOKENS"):
+            self.request_options["max_tokens"] = int(os.environ["WORLDMM_LMDEPLOY_MAX_TOKENS"])
+        self.sync_client = client or OpenAI(api_key=self.api_key, base_url=self.base_url)
         self.kwargs = request_options
         self.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 

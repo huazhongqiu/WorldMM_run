@@ -13,8 +13,8 @@ class Qwen3EmbeddingModel:
         
         self.model = SentenceTransformer(
             model_name,
-            model_kwargs={"attn_implementation": os.environ.get("WORLDMM_TEXT_ATTENTION", "sdpa"), "dtype": "auto", "device_map": device},
-            tokenizer_kwargs={"padding_side": "left"},
+            model_kwargs={"attn_implementation": os.environ.get("WORLDMM_TEXT_ATTENTION", "sdpa"), "torch_dtype": "auto", "device_map": device},
+            processor_kwargs={"padding_side": "left"},
         )
     
     def encode_text(self, texts: Union[str, List[str]], batch_size: int = 256) -> np.ndarray:

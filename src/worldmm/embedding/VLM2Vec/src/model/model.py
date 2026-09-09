@@ -1,3 +1,4 @@
+import os
 from typing import Dict
 import torch
 import torch.distributed as dist
@@ -143,8 +144,9 @@ class MMEBModel(nn.Module):
         print_master(f'Loading backbone [{model_args.model_backbone}] from {model_name_or_path}')
         if model_args.model_backbone in {QWEN2_VL, QWEN2_VL_TOKENSELECTION}:
             config = AutoConfig.from_pretrained(model_args.model_name, trust_remote_code=True)
-            config._attn_implementation = "flash_attention_2"
-            config.vision_config._attn_implementation = "flash_attention_2"
+            attention_implementation = os.environ.get("WORLDMM_VLM_ATTENTION", "sdpa")
+            config._attn_implementation = attention_implementation
+            config.vision_config._attn_implementation = attention_implementation
             base_model = backbone2model[model_args.model_backbone].from_pretrained(
                 model_args.model_name,
                 torch_dtype=torch.bfloat16,
