@@ -153,6 +153,7 @@ class VisualMemory:
     def __init__(
         self,
         embedding_model: Optional[EmbeddingModel] = None,
+        video_root: Optional[str] = None,
     ):
         """
         Initialize VisualMemory.
@@ -161,6 +162,7 @@ class VisualMemory:
             embedding_model: Embedding model for computing query embeddings (optional)
         """
         self.embedding_model = embedding_model
+        self.video_root = video_root or os.environ.get("WORLDMM_VIDEO_ROOT")
         
         # Storage for video clips
         self.clips: List[VideoClipEntry] = []
@@ -213,17 +215,20 @@ class VisualMemory:
         """
         for idx, entry in enumerate(data):
             clip_id = entry.get("clip_id") or entry.get("id") or f"visual_{idx}"
-            video_path = entry.get("source_video_path") or entry.get("video_path", "")
+            source_video_path = entry.get("source_video_path") or entry.get("video_path", "")
+            video_path = source_video_path
             
             # Get precomputed embedding if available (try clip_id, video_path, start_time)
             embedding = self.embedding_lookup.get(clip_id)
             if embedding is None:
-                embedding = self.embedding_lookup.get(video_path)
+                embedding = self.embedding_lookup.get(source_video_path)
             if embedding is None:
                 start_time_key = str(entry.get("start_time", ""))
                 embedding = self.embedding_lookup.get(start_time_key)
             
             clip_start_sec = entry.get("start_sec")
+            if self.video_root and video_path and not os.path.isabs(video_path):
+                video_path = os.path.join(self.video_root, video_path)
             clip_end_sec = entry.get("end_sec")
             if clip_start_sec is None and entry.get("start_time"):
                 clip_start_sec = _time_str_to_seconds(str(entry["start_time"]))

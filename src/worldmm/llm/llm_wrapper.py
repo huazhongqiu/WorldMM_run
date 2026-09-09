@@ -41,6 +41,8 @@ class LLMModel:
         # Auto-detect based on model name patterns
         if "gpt" in model_name_lower:
             return "openai"
+        elif "qwen3.5" in model_name_lower:
+            return "lmdeploy"
         elif "qwen3" in model_name_lower:
             return "qwen3vl"
         else:
@@ -53,6 +55,9 @@ class LLMModel:
         elif self.provider == "qwen3vl":
             from .qwen3vl import Qwen3VLModel
             return Qwen3VLModel(model_name=self.model_name, **kwargs)
+        elif self.provider == "lmdeploy":
+            from .lmdeploy import LMDeployModel
+            return LMDeployModel(model_name=self.model_name, **kwargs)
         else:
             raise ValueError(f"Unsupported provider: {self.provider}")
 
@@ -64,6 +69,8 @@ class LLMModel:
             return self.model.generate(prompt, **kwargs)
         elif self.provider == "qwen3vl":
             return self.model.generate(prompt, **kwargs)
+        elif self.provider == "lmdeploy":
+            return self.model.generate(prompt, **kwargs)
         else:
             raise NotImplementedError(f"Model {self.provider} does not support text generation.")
 
@@ -74,6 +81,8 @@ class LLMModel:
         if self.provider == "openai":
             return self.model.generate_batch(batch_prompts, **kwargs)
         elif self.provider == "qwen3vl":
+            return self.model.generate_batch(batch_prompts, **kwargs)
+        elif self.provider == "lmdeploy":
             return self.model.generate_batch(batch_prompts, **kwargs)
         else:
             raise NotImplementedError(f"Model {self.provider} does not support batch generation.")

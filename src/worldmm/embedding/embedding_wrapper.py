@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from typing import Union, List, Dict, Any, Optional
 from PIL import Image
@@ -7,8 +8,8 @@ class EmbeddingModel:
     """Universal embedding wrapper that routes different modalities to appropriate models"""
     
     def __init__(self, 
-                text_model_name: str = "Qwen/Qwen3-Embedding-4B",
-                vis_model_name: str = "VLM2Vec/VLM2Vec-V2.0",
+                text_model_name: str = "/myworkspace/mymodels/Qwen3-Embedding-4B",
+                vis_model_name: str = "/myworkspace/mymodels/VLM2Vec",
                 device: str = "cuda"):
         """
         Initialize embedding models for different modalities
@@ -23,8 +24,8 @@ class EmbeddingModel:
         # Initialize models lazily
         self._text_model = None
         self._vis_model = None
-        self.text_model_name = text_model_name
-        self.vis_model_name = vis_model_name
+        self.text_model_name = os.environ.get("WORLDMM_TEXT_EMBEDDING_MODEL", text_model_name)
+        self.vis_model_name = os.environ.get("WORLDMM_VISUAL_EMBEDDING_MODEL", vis_model_name)
 
         # Eagerly load models
         # self._text_model = self.text_model

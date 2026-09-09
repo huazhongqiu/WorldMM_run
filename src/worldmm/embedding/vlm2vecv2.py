@@ -1,3 +1,4 @@
+import os
 from typing import List, Union, Optional, Dict, Any
 from PIL import Image
 import logging
@@ -21,6 +22,7 @@ class VLM2VecV2EmbeddingModel:
     
     def __init__(self, 
                  model_name: str = "VLM2Vec/VLM2Vec-V2.0",
+                 base_model_name: str = "/myworkspace/mymodels/Qwen2-VL-2B-Instruct",
                  pooling: str = "last",
                  normalize: bool = True,
                  device: str = "cuda"):
@@ -34,6 +36,7 @@ class VLM2VecV2EmbeddingModel:
             device: Device to run model on
         """
         self.model_name = model_name
+        self.base_model_name = os.environ.get("WORLDMM_VLM_BACKBONE_MODEL", base_model_name)
         self.pooling = pooling
         self.normalize = normalize
         self.device = device
@@ -49,7 +52,8 @@ class VLM2VecV2EmbeddingModel:
         """Load the VLM2Vec V2.0 model and processor"""
         # Set up model arguments
         model_args = ModelArguments(
-            model_name=self.model_name,
+            model_name=self.base_model_name,
+            checkpoint_path=self.model_name,
             pooling=self.pooling,
             normalize=self.normalize,
             model_backbone='qwen2_vl',

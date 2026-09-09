@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 from worldmm.llm import LLMModel
 
-model = LLMModel(model_name="gpt-5-mini")
+model = LLMModel(model_name="Qwen3.5-4B")
 
 SYSTEM_PROMPT = "You are a helpful assistant that translates text from Chinese to English. Answer in translated text only."
 

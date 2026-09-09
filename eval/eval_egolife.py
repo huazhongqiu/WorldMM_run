@@ -6,13 +6,18 @@ EgoLifeQA evaluation script using WorldMM unified memory system.
 import os
 import json
 import re
+import glob
 import argparse
+import time
+from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
 from tqdm import tqdm
 import logging
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+from reporting import build_report_rows, write_report
 
 from worldmm.embedding import EmbeddingModel
 from worldmm.llm import LLMModel, PromptTemplateManager
@@ -66,6 +71,14 @@ def evaluate_prediction(prediction: str, gold_letter: str, choices: Dict[str, st
         return True
 
     return False
+
+def usage_total(*models: LLMModel) -> int:
+    total = 0
+    for model in models:
+        snapshot = getattr(model.model, "usage_snapshot", lambda: {})()
+        total += int(snapshot.get("total_tokens", 0))
+    return total
+
 
 
 def find_30s_segment(target_timestamp: int, segments_30s: List[Dict[str, Any]]) -> Tuple[int, int]:
@@ -162,15 +175,21 @@ def parse_target_time(row: Dict[str, Any], segments_30s: List[Dict[str, Any]]) -
 def main():
     parser = argparse.ArgumentParser(description="EgoLifeQA Evaluation with WorldMM")
     parser.add_argument("--subject", type=str, default="A1_JAKE", help="Subject ID")
-    parser.add_argument("--retriever-model", type=str, default="gpt-5-mini", help="LLM model for retrieval (NER, OpenIE)")
-    parser.add_argument("--respond-model", type=str, default="gpt-5", help="LLM model for iterative reasoning and generating answers")
+    parser.add_argument("--retriever-model", type=str, default="Qwen3.5-4B", help="LMDeploy model for retrieval")
+    parser.add_argument("--respond-model", type=str, default="Qwen3.5-4B", help="LMDeploy model for reasoning and answers")
     parser.add_argument("--max-rounds", type=int, default=5, help="Maximum retrieval rounds")
     parser.add_argument("--max-errors", type=int, default=5, help="Maximum errors before forcing answer")
     parser.add_argument("--episodic-top-k", type=int, default=3, help="Top-k for episodic retrieval")
     parser.add_argument("--semantic-top-k", type=int, default=10, help="Top-k for semantic retrieval")
     parser.add_argument("--visual-top-k", type=int, default=3, help="Top-k for visual retrieval")
-    parser.add_argument("--output-dir", type=str, default="output", help="Output directory")
+    parser.add_argument("--output-dir", type=str, default="/workspace/worldmm/eval", help="External artifact directory")
     parser.add_argument("--data-dir", type=str, default="data/EgoLife", help="Data directory")
+    parser.add_argument("--caption-dir", type=str, default=None, help="Extracted EgoLifeCap root")
+    parser.add_argument("--metadata-dir", type=str, default=None, help="Existing three-memory metadata root")
+    parser.add_argument("--video-root", type=str, default=None, help="Mounted root for relative video paths")
+    parser.add_argument("--mode", choices=["smoke", "test"], default="test")
+    parser.add_argument("--agent", default="WorldMM")
+    parser.add_argument("--limit", type=int, default=None, help="Maximum questions; use only for smoke")
     args = parser.parse_args()
 
     # Initialize models
@@ -181,7 +200,6 @@ def main():
     )
     respond_llm_model = LLMModel(
         model_name=args.respond_model,
-        fps=1,
     )
     prompt_template_manager = PromptTemplateManager()
 
@@ -210,9 +228,12 @@ def main():
     
     eval_data_path = os.path.join(data_dir, f"EgoLifeQA/EgoLifeQA_{subject}.json")
     eval_data = load_json(eval_data_path)
+    if args.limit is not None:
+        eval_data = eval_data[:args.limit]
     
     # Load episodic captions for all granularities (multiscale memory)
-    episodic_caption_dir = os.path.join(data_dir, f"EgoLifeCap/{subject}")
+    caption_root = args.caption_dir or data_dir
+    episodic_caption_dir = os.path.join(caption_root, f"EgoLifeCap/{subject}")
     granularities = ["30sec", "3min", "10min", "1h"]
     episodic_caption_files = {
         g: os.path.join(episodic_caption_dir, f"{subject}_{g}.json")
@@ -222,11 +243,17 @@ def main():
     episodic_captions_30sec = load_json(episodic_caption_files["30sec"])
     
     # Load semantic results
-    semantic_path = os.path.join(f"output/metadata/semantic_memory/{subject}/semantic_consolidation_results_gpt-5-mini.json")
+    metadata_dir = args.metadata_dir or "output/metadata"
+    semantic_candidates = glob.glob(os.path.join(metadata_dir, f"semantic_memory/{subject}/semantic_consolidation_results_*.json"))
+    if len(semantic_candidates) != 1:
+        raise FileNotFoundError(f"Expected exactly one semantic consolidation file, found: {semantic_candidates}")
+    semantic_path = semantic_candidates[0]
     semantic_results = load_json(semantic_path)
     
     # Load visual embeddings
-    visual_path = os.path.join(f"output/metadata/visual_memory/{subject}/visual_embeddings.pkl")
+    visual_path = os.path.join(metadata_dir, f"visual_memory/{subject}/visual_embeddings.pkl")
+    if args.video_root:
+        os.environ["WORLDMM_VIDEO_ROOT"] = args.video_root
     
     # Load data into WorldMemory
     logger.info("Loading data into WorldMemory...")
@@ -266,6 +293,8 @@ def main():
         logger.info(f"Processing ID {ID}: {question[:50]}...")
 
         qa_result: Optional[QAResult] = None
+        started_at = time.perf_counter()
+        tokens_before = usage_total(retriever_llm_model, respond_llm_model)
         try:            
             # Answer the question
             qa_result = world_memory.answer(
@@ -280,6 +309,8 @@ def main():
             logger.error(f"Error processing ID {ID}: {e}")
             response = "Error"
 
+        elapsed_seconds = time.perf_counter() - started_at
+        total_tokens = usage_total(retriever_llm_model, respond_llm_model) - tokens_before
         # Evaluate
         evaluate = evaluate_prediction(response, answer, choices)
         evaluate_true += int(evaluate)
@@ -294,6 +325,9 @@ def main():
             "response": response,
             "round_history": qa_result.round_history if qa_result else [],
             "num_rounds": qa_result.num_rounds if qa_result else 0,
+            "completed": qa_result is not None,
+            "total_tokens": total_tokens,
+            "elapsed_seconds": elapsed_seconds,
             "evaluate": evaluate,
             "query_time": query_time,
             # "query_time_str": transform_timestamp(str(query_time)),
@@ -320,6 +354,13 @@ def main():
     
     with open(output_path, 'w') as f:
         json.dump(results, f, indent=4)
+
+    report_dir = Path(output_path).parent
+    report_paths = write_report(
+        build_report_rows(results, agent=args.agent, mode=args.mode, model=args.respond_model),
+        report_dir, title="EgoLifeQA Run Report",
+    )
+    logger.info(f"Report saved to: {report_paths['html']}")
     
     # Print summary
     final_accuracy = evaluate_true / len(results) if results else 0
