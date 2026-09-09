@@ -228,7 +228,8 @@ class VisualMemory:
             
             clip_start_sec = entry.get("start_sec")
             if self.video_root and video_path and not os.path.isabs(video_path):
-                video_path = os.path.join(self.video_root, video_path)
+                relative_path = video_path.removeprefix("data/EgoLife/")
+                video_path = os.path.join(self.video_root, relative_path)
             clip_end_sec = entry.get("end_sec")
             if clip_start_sec is None and entry.get("start_time"):
                 clip_start_sec = _time_str_to_seconds(str(entry["start_time"]))
