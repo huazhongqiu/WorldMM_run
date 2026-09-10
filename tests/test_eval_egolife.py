@@ -47,3 +47,10 @@ def test_embedding_device_can_be_separated_from_lmdeploy_gpu(monkeypatch) -> Non
         assert EmbeddingModel().device == "cuda:1"
     finally:
         sys.path.remove(str(ROOT / "src"))
+
+
+def test_smoke_script_defaults_to_flash_attention_2() -> None:
+    script = ROOT / "script" / "run_egolife_smoke.sh"
+    content = script.read_text(encoding="utf-8")
+    assert 'WORLDMM_TEXT_ATTENTION="${WORLDMM_TEXT_ATTENTION:-flash_attention_2}"' in content
+    assert 'WORLDMM_VLM_ATTENTION="${WORLDMM_VLM_ATTENTION:-flash_attention_2}"' in content

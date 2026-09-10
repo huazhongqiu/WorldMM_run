@@ -13,7 +13,7 @@ class Qwen3EmbeddingModel:
         
         self.model = SentenceTransformer(
             model_name,
-            model_kwargs={"attn_implementation": os.environ.get("WORLDMM_TEXT_ATTENTION", "sdpa"), "torch_dtype": "auto", "device_map": device},
+            model_kwargs={"attn_implementation": os.environ.get("WORLDMM_TEXT_ATTENTION", "flash_attention_2"), "torch_dtype": "auto", "device_map": device},
             processor_kwargs={"padding_side": "left"},
         )
     

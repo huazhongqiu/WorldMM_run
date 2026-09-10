@@ -26,4 +26,5 @@ def test_qwen3_embedding_uses_transformers_452_compatible_load_kwargs() -> None:
     model_kwargs = FakeSentenceTransformer.kwargs["model_kwargs"]
     assert model_kwargs["torch_dtype"] == "auto"
     assert "dtype" not in model_kwargs
+    assert model_kwargs["attn_implementation"] == "flash_attention_2"
     assert FakeSentenceTransformer.kwargs["processor_kwargs"] == {"padding_side": "left"}
