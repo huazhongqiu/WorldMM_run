@@ -50,6 +50,18 @@ def render_progress_bar(completed: int, total: int, width: int = 20) -> str:
     return f"[{'#' * filled}{'-' * (width - filled)}] {fraction * 100:.1f}% ({safe_completed}/{safe_total})"
 
 
+def format_stage_progress(completed: int, total: int, width: int = 20) -> str:
+    """Render the explicit progress fields used by every indexing stage."""
+    safe_total = max(total, 1)
+    safe_completed = min(max(completed, 0), safe_total)
+    percentage = safe_completed / safe_total * 100
+    bar = render_progress_bar(safe_completed, safe_total, width).split(" ", 1)[0]
+    return (
+        f"已完成={safe_completed} 总数={safe_total} "
+        f"百分比={percentage:.1f}% 进度条={bar}"
+    )
+
+
 
 class WorkflowProgressLogger:
     """Serialize concise, human-readable evaluator progress from worker threads."""
@@ -478,11 +490,18 @@ def evaluate_parallel_egolife(
                     worker=state.worker_id, question_id=row["ID"],
                     until_time=transform_timestamp(str(details["until_time"])),
                 )
-            elif event == "episodic_index_start":
-                workflow.start_flow(f"Worker {state.worker_id} {details['granularity']} 索引")
+            elif event == "caption_progress":
+                if details["completed"] == 0:
+                    workflow.start_flow(f"Worker {state.worker_id} {details['granularity']}")
                 workflow.status(
                     worker=state.worker_id, question_id=row["ID"],
-                    granularity=details["granularity"], captions=details["total"],
+                    stage=details["granularity"],
+                    progress=format_stage_progress(details["completed"], details["total"]),
+                )
+            elif event == "episodic_index_start":
+                workflow.status(
+                    worker=state.worker_id, question_id=row["ID"],
+                    stage=details["granularity"], index="submitted",
                 )
             elif event == "openie_progress":
                 if details["completed"] == 0:
@@ -491,7 +510,7 @@ def evaluate_parallel_egolife(
                 workflow.status(
                     worker=state.worker_id, question_id=row["ID"],
                     granularity=details["granularity"], stage=details["stage"],
-                    progress=render_progress_bar(details["completed"], details["total"]),
+                    progress=format_stage_progress(details["completed"], details["total"]),
                 )
             elif event == "episodic_index_complete":
                 workflow.status(

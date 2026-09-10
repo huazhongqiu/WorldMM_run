@@ -212,17 +212,37 @@ class EpisodicMemory:
                 logger.warning(f"No captions loaded for granularity {granularity}")
                 continue
             
-            # Get entries that should be indexed (end_time <= until_time)
-            entries_to_index = [
-                entry for entry in self.captions[granularity]
-                if entry.timestamp_int[1] <= until_time
-            ]
+            # Select captions up to the requested time and expose real scan progress.
+            all_entries = self.captions[granularity]
+            total_entries = len(all_entries)
+            progress_interval = max(1, total_entries // 20)
+            if progress_callback is not None:
+                progress_callback(
+                    "caption_progress",
+                    granularity=granularity,
+                    completed=0,
+                    total=total_entries,
+                )
+
+            entries_to_index = []
+            for completed, entry in enumerate(all_entries, start=1):
+                if entry.timestamp_int[1] <= until_time:
+                    entries_to_index.append(entry)
+                if progress_callback is not None and (
+                    completed == total_entries or completed % progress_interval == 0
+                ):
+                    progress_callback(
+                        "caption_progress",
+                        granularity=granularity,
+                        completed=completed,
+                        total=total_entries,
+                    )
             
             if not entries_to_index:
                 logger.debug(f"No entries to index for granularity {granularity} up to {until_time}")
                 continue
             
-            # Get caption texts for HippoRAG
+            # Get caption texts for HippoRAG.
             caption_texts = [entry.text for entry in entries_to_index]
             
             # Get or create HippoRAG instance and update index

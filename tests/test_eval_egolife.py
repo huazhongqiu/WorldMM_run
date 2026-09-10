@@ -206,6 +206,49 @@ def test_progress_bar_renders_completed_fraction() -> None:
     assert module.render_progress_bar(12, 10, width=10) == "[##########] 100.0% (10/10)"
 
 
+
+
+def test_stage_progress_explicitly_shows_completed_total_percent_and_bar() -> None:
+    module = _load_eval_module()
+
+    assert module.format_stage_progress(5, 10, width=10) == (
+        "已完成=5 总数=10 百分比=50.0% 进度条=[#####-----]"
+    )
+
+
+def test_episodic_index_reports_caption_progress_before_openie_stages() -> None:
+    sys.path.insert(0, str(ROOT / "src"))
+    try:
+        from worldmm.memory.episodic.memory import EpisodicMemory
+
+        class FakeOpenIE:
+            def set_progress_callback(self, callback):
+                self.callback = callback
+
+        class FakeHippoRAG:
+            def __init__(self):
+                self.openie = FakeOpenIE()
+                self.docs = []
+
+            def update(self, docs):
+                self.docs = docs
+
+        memory = EpisodicMemory(embedding_model=SimpleNamespace(), llm_model=SimpleNamespace(), prompt_template_manager=SimpleNamespace(), granularities=["30sec"])
+        memory.captions["30sec"] = [SimpleNamespace(timestamp_int=(0, index), text=f"caption {index}") for index in range(1, 4)]
+        fake_hipporag = FakeHippoRAG()
+        memory._get_or_create_hipporag = lambda _granularity: fake_hipporag
+        events = []
+
+        memory.index(3, progress_callback=lambda event, **details: events.append((event, details)))
+
+        caption_events = [details for event, details in events if event == "caption_progress"]
+        assert caption_events[0] == {"granularity": "30sec", "completed": 0, "total": 3}
+        assert caption_events[-1] == {"granularity": "30sec", "completed": 3, "total": 3}
+        assert fake_hipporag.docs == ["caption 1", "caption 2", "caption 3"]
+    finally:
+        sys.path.remove(str(ROOT / "src"))
+
+
 def test_episodic_index_wires_openie_progress_callback() -> None:
     content = (ROOT / "src" / "worldmm" / "memory" / "episodic" / "memory.py").read_text(encoding="utf-8")
     assert "progress_callback" in content
