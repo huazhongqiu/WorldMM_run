@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Dict, Any, List, Tuple, Union
+from typing import Callable, Dict, Any, List, Optional, Tuple, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import logging
@@ -14,8 +14,23 @@ logger = logging.getLogger(__name__)
 class OpenIE:
     def __init__(self, llm_model: LLMModel):
         # Init prompt template manager
+        self._progress_callback: Optional[Callable[[str, int, int], None]] = None
         self.prompt_template_manager = PromptTemplateManager(role_mapping={"system": "system", "user": "user", "assistant": "assistant"})
         self.llm_model = llm_model
+
+
+    def set_progress_callback(
+        self, callback: Optional[Callable[[str, int, int], None]]
+    ) -> None:
+        """Set a throttled-progress callback for batch OpenIE stages."""
+        self._progress_callback = callback
+
+    def _report_progress(self, stage: str, completed: int, total: int) -> None:
+        if self._progress_callback is None:
+            return
+        interval = max(1, total // 20)
+        if completed in (0, total) or completed % interval == 0:
+            self._progress_callback(stage, completed, total)
 
     @dynamic_retry_decorator
     def _execute_ner_call(self, ner_input_message) -> List[str]:
@@ -142,10 +157,13 @@ class OpenIE:
                 for chunk_key in chunk_keys
             }
 
-            pbar = tqdm(as_completed(ner_futures), total=len(ner_futures), desc="NER")
-            for future in pbar:
+            total_ner = len(ner_futures)
+            self._report_progress("ner", 0, total_ner)
+            pbar = tqdm(as_completed(ner_futures), total=total_ner, desc="NER")
+            for completed, future in enumerate(pbar, start=1):
                 result = future.result()
                 ner_results_list.append(result)
+                self._report_progress("ner", completed, total_ner)
 
         triple_results_list = []
         with ThreadPoolExecutor() as executor:
@@ -157,10 +175,13 @@ class OpenIE:
                 for ner_result in ner_results_list
             }
             # Collect triple extraction results with progress bar
-            pbar = tqdm(as_completed(re_futures), total=len(re_futures), desc="Extracting triples")
-            for future in pbar:
+            total_triples = len(re_futures)
+            self._report_progress("triples", 0, total_triples)
+            pbar = tqdm(as_completed(re_futures), total=total_triples, desc="Extracting triples")
+            for completed, future in enumerate(pbar, start=1):
                 result = future.result()
                 triple_results_list.append(result)
+                self._report_progress("triples", completed, total_triples)
 
         # Build maps from chunk_id to results (these may be in completion order)
         ner_map = {res.chunk_id: res.unique_entities for res in ner_results_list}

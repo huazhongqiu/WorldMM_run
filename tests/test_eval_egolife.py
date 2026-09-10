@@ -2,6 +2,7 @@ import json
 import logging
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 import importlib.util
@@ -195,3 +196,38 @@ def test_parallel_evaluator_passes_worker_context_to_memory_progress_callback() 
     assert "worker=state.worker_id" in content
     assert "workflow.start_flow(" in content
     assert "progress.close()" not in content
+
+
+def test_progress_bar_renders_completed_fraction() -> None:
+    module = _load_eval_module()
+
+    assert module.render_progress_bar(0, 10, width=10) == "[----------] 0.0% (0/10)"
+    assert module.render_progress_bar(5, 10, width=10) == "[#####-----] 50.0% (5/10)"
+    assert module.render_progress_bar(12, 10, width=10) == "[##########] 100.0% (10/10)"
+
+
+def test_episodic_index_wires_openie_progress_callback() -> None:
+    content = (ROOT / "src" / "worldmm" / "memory" / "episodic" / "memory.py").read_text(encoding="utf-8")
+    assert "progress_callback" in content
+    assert "set_progress_callback" in content
+
+
+def test_openie_reports_throttled_ner_and_triple_progress(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "src"))
+    try:
+        from worldmm.memory.episodic.openie import OpenIE
+
+        openie = OpenIE(SimpleNamespace(model_name="test-model"))
+        events: list[tuple[str, int, int]] = []
+        openie.set_progress_callback(lambda stage, completed, total: events.append((stage, completed, total)))
+        openie.ner = lambda chunk_id, _: SimpleNamespace(chunk_id=chunk_id, unique_entities=[])
+        openie.triple_extraction = lambda chunk_id, _passage, _entities: SimpleNamespace(chunk_id=chunk_id, triples=[])
+
+        openie.batch_openie(["first", "second"], output_dir=str(tmp_path))
+
+        assert ("ner", 0, 2) in events
+        assert ("ner", 2, 2) in events
+        assert ("triples", 0, 2) in events
+        assert ("triples", 2, 2) in events
+    finally:
+        sys.path.remove(str(ROOT / "src"))

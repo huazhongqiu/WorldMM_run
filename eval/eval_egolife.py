@@ -41,6 +41,15 @@ def compact_text(value: Any, limit: int = 180) -> str:
     text = str(value).replace("\n", " ").replace("\r", " ").strip()
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
+def render_progress_bar(completed: int, total: int, width: int = 20) -> str:
+    """Render a bounded one-line progress bar for long indexing stages."""
+    safe_total = max(total, 1)
+    safe_completed = min(max(completed, 0), safe_total)
+    fraction = safe_completed / safe_total
+    filled = round(width * fraction)
+    return f"[{'#' * filled}{'-' * (width - filled)}] {fraction * 100:.1f}% ({safe_completed}/{safe_total})"
+
+
 
 class WorkflowProgressLogger:
     """Serialize concise, human-readable evaluator progress from worker threads."""
@@ -468,6 +477,26 @@ def evaluate_parallel_egolife(
                 workflow.status(
                     worker=state.worker_id, question_id=row["ID"],
                     until_time=transform_timestamp(str(details["until_time"])),
+                )
+            elif event == "episodic_index_start":
+                workflow.start_flow(f"Worker {state.worker_id} {details['granularity']} 索引")
+                workflow.status(
+                    worker=state.worker_id, question_id=row["ID"],
+                    granularity=details["granularity"], captions=details["total"],
+                )
+            elif event == "openie_progress":
+                if details["completed"] == 0:
+                    stage_name = "NER" if details["stage"] == "ner" else "三元组抽取"
+                    workflow.start_flow(f"Worker {state.worker_id} {details['granularity']} {stage_name}")
+                workflow.status(
+                    worker=state.worker_id, question_id=row["ID"],
+                    granularity=details["granularity"], stage=details["stage"],
+                    progress=render_progress_bar(details["completed"], details["total"]),
+                )
+            elif event == "episodic_index_complete":
+                workflow.status(
+                    worker=state.worker_id, question_id=row["ID"],
+                    granularity=details["granularity"], index="complete",
                 )
             elif event == "index_complete":
                 workflow.status(worker=state.worker_id, question_id=row["ID"], index="complete")

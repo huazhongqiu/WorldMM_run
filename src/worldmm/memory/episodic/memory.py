@@ -4,7 +4,7 @@ Episodic Memory module for WorldMM.
 
 import json
 import logging
-from typing import Dict, List, Any, Optional, Tuple, Union
+from typing import Callable, Dict, List, Any, Optional, Tuple, Union
 from dataclasses import dataclass
 
 from ...llm import LLMModel, PromptTemplateManager
@@ -183,7 +183,11 @@ class EpisodicMemory:
             self.caption_id_to_entry[caption_id] = caption_entry
             self.text_to_entry[caption_entry.text] = caption_entry
     
-    def index(self, until_time: int) -> None:
+    def index(
+        self,
+        until_time: int,
+        progress_callback: Optional[Callable[..., None]] = None,
+    ) -> None:
         """
         Index captions up to the specified timestamp using HippoRAG.
         
@@ -223,7 +227,25 @@ class EpisodicMemory:
             
             # Get or create HippoRAG instance and update index
             hipporag = self._get_or_create_hipporag(granularity)
+            if progress_callback is not None:
+                progress_callback("episodic_index_start", granularity=granularity, total=len(caption_texts))
+            set_progress_callback = getattr(hipporag.openie, "set_progress_callback", None)
+            if callable(set_progress_callback):
+                if progress_callback is None:
+                    set_progress_callback(None)
+                else:
+                    set_progress_callback(
+                        lambda stage, completed, total: progress_callback(
+                            "openie_progress",
+                            granularity=granularity,
+                            stage=stage,
+                            completed=completed,
+                            total=total,
+                        )
+                    )
             hipporag.update(docs=caption_texts)
+            if progress_callback is not None:
+                progress_callback("episodic_index_complete", granularity=granularity, total=len(caption_texts))
             
             # Update indexed entries
             self.indexed_entries[granularity] = entries_to_index

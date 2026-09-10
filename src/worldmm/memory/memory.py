@@ -156,7 +156,11 @@ class WorldMemory:
         if clips_data:
             self.visual_memory.load_clips_from_data(clips_data)
     
-    def index(self, until_time: int) -> None:
+    def index(
+        self,
+        until_time: int,
+        progress_callback: Optional[Callable[..., None]] = None,
+    ) -> None:
         """
         Index all memory types up to the specified timestamp.
         
@@ -173,7 +177,7 @@ class WorldMemory:
         logger.info(f"Indexing all memories up to {transform_timestamp(str(until_time))}")
         
         # Index each memory type
-        self.episodic_memory.index(until_time)
+        self.episodic_memory.index(until_time, progress_callback=progress_callback)
         self.semantic_memory.index(until_time)
         self.visual_memory.index(until_time)
         
@@ -436,7 +440,7 @@ Retrieved:
         # Index if needed
         if until_time and until_time > self.indexed_time:
             emit_progress("index_start", until_time=until_time)
-            self.index(until_time)
+            self.index(until_time, progress_callback=progress_callback)
             emit_progress("index_complete", until_time=until_time)
         
         # Format query with choices if provided
