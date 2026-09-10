@@ -54,6 +54,7 @@ def test_lmdeploy_uses_chat_completions_and_accumulates_usage() -> None:
         {
             "model": "Qwen3.5-4B",
             "messages": [{"role": "user", "content": "hello"}],
+            "extra_body": {"enable_thinking": False},
         }
     ]
     assert model.usage == {

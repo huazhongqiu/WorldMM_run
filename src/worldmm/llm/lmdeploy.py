@@ -34,6 +34,14 @@ class LMDeployModel:
             )
         self.api_key = api_key or os.environ.get("WORLDMM_LMDEPLOY_API_KEY", "EMPTY")
         self.request_options = request_options
+        self.request_options.setdefault(
+            "extra_body",
+            {
+                "enable_thinking": os.environ.get(
+                    "WORLDMM_LMDEPLOY_ENABLE_THINKING", "false"
+                ).strip().lower() == "true"
+            },
+        )
         if "max_tokens" not in self.request_options and os.environ.get("WORLDMM_LMDEPLOY_MAX_TOKENS"):
             self.request_options["max_tokens"] = int(os.environ["WORLDMM_LMDEPLOY_MAX_TOKENS"])
         self.sync_client = client or OpenAI(api_key=self.api_key, base_url=self.base_url)
