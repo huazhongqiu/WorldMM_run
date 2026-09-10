@@ -1,3 +1,8 @@
+import json
+import threading
+import time
+
+import pytest
 import importlib.util
 from pathlib import Path
 import sys
@@ -54,3 +59,78 @@ def test_smoke_script_defaults_to_flash_attention_2() -> None:
     content = script.read_text(encoding="utf-8")
     assert 'WORLDMM_TEXT_ATTENTION="${WORLDMM_TEXT_ATTENTION:-flash_attention_2}"' in content
     assert 'WORLDMM_VLM_ATTENTION="${WORLDMM_VLM_ATTENTION:-flash_attention_2}"' in content
+
+
+def test_question_manifest_selects_exact_ids_in_manifest_order(tmp_path: Path) -> None:
+    module = _load_eval_module()
+    manifest = tmp_path / "test.json"
+    manifest.write_text(json.dumps(["3", "1"]), encoding="utf-8")
+    rows = [{"ID": "1"}, {"ID": "2"}, {"ID": "3"}]
+
+    assert module.select_questions(rows, manifest) == [{"ID": "3"}, {"ID": "1"}]
+
+    manifest.write_text(json.dumps(["4"]), encoding="utf-8")
+    with pytest.raises(ValueError, match="Unknown EgoLife question IDs"):
+        module.select_questions(rows, manifest)
+
+
+def test_parallel_evaluator_preserves_input_order_and_uses_multiple_threads() -> None:
+    module = _load_eval_module()
+    thread_ids: set[int] = set()
+    lock = threading.Lock()
+
+    def evaluate(item: int) -> int:
+        with lock:
+            thread_ids.add(threading.get_ident())
+        time.sleep(0.02)
+        return item * 10
+
+    assert module.evaluate_in_parallel([1, 2, 3, 4], workers=2, evaluate=evaluate) == [10, 20, 30, 40]
+    assert len(thread_ids) >= 2
+
+
+def test_test_runner_uses_the_committed_day6_day7_manifest() -> None:
+    script = ROOT / "script" / "run_egolife_test.sh"
+    content = script.read_text(encoding="utf-8")
+    assert 'eval/splits/egolife_a1_jake_day6_day7_test.json' in content
+    assert '--workers "${WORKERS}"' in content
+
+
+def test_select_evaluation_rows_applies_manifest_before_limit(tmp_path: Path) -> None:
+    module = _load_eval_module()
+    manifest = tmp_path / "test.json"
+    manifest.write_text(json.dumps(["3", "1"]), encoding="utf-8")
+    rows = [{"ID": "1"}, {"ID": "2"}, {"ID": "3"}]
+
+    assert module.select_evaluation_rows(rows, manifest, limit=1) == [{"ID": "3"}]
+
+
+def test_synchronized_embedding_model_locks_generic_encode() -> None:
+    module = _load_eval_module()
+
+    class FakeEmbeddingModel:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+            self.lock = threading.Lock()
+
+        def encode(self, item: int) -> int:
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            time.sleep(0.02)
+            with self.lock:
+                self.active -= 1
+            return item
+
+    fake = FakeEmbeddingModel()
+    synchronized = module.SynchronizedEmbeddingModel(fake)
+
+    assert module.evaluate_in_parallel([1, 2], workers=2, evaluate=synchronized.encode) == [1, 2]
+    assert fake.max_active == 1
+
+
+def test_test_runner_defaults_to_four_workers() -> None:
+    script = ROOT / "script" / "run_egolife_test.sh"
+    content = script.read_text(encoding="utf-8")
+    assert 'WORLDMM_EGOLIFE_WORKERS:-4' in content

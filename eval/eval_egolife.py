@@ -4,6 +4,9 @@ EgoLifeQA evaluation script using WorldMM unified memory system.
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from itertools import count
+from threading import Lock, local
 import json
 import re
 import glob
@@ -11,6 +14,7 @@ import argparse
 import time
 from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
+from typing import Callable
 from tqdm import tqdm
 import logging
 
@@ -180,9 +184,249 @@ def parse_target_time(row: Dict[str, Any], segments_30s: List[Dict[str, Any]]) -
     return target_time_list
 
 
+def select_questions(rows: List[Dict[str, Any]], manifest_path: str | Path) -> List[Dict[str, Any]]:
+    """Return the manifest-selected rows in manifest order."""
+    manifest = load_json(str(manifest_path))
+    if isinstance(manifest, dict):
+        manifest = manifest.get("question_ids", manifest.get("sample_ids"))
+    if not isinstance(manifest, list):
+        raise ValueError("EgoLife question manifest must be a JSON list of IDs")
+    question_ids = [str(question_id) for question_id in manifest]
+    if len(question_ids) != len(set(question_ids)):
+        raise ValueError("EgoLife question manifest contains duplicate IDs")
+    rows_by_id = {str(row["ID"]): row for row in rows}
+    unknown = sorted(set(question_ids) - rows_by_id.keys())
+    if unknown:
+        raise ValueError(f"Unknown EgoLife question IDs: {unknown}")
+    return [rows_by_id[question_id] for question_id in question_ids]
+
+
+def select_evaluation_rows(
+    rows: List[Dict[str, Any]], manifest_path: Optional[str | Path], limit: Optional[int]
+) -> List[Dict[str, Any]]:
+    """Select an explicit split before applying an optional smoke-test limit."""
+    selected_rows = select_questions(rows, manifest_path) if manifest_path else rows
+    return selected_rows[:limit] if limit is not None else selected_rows
+
+
+def evaluate_in_parallel(
+    items: List[Any],
+    *,
+    workers: int,
+    evaluate: Callable[[Any], Any],
+    on_complete: Optional[Callable[[int, Any], None]] = None,
+) -> List[Any]:
+    """Evaluate items concurrently while returning results in input order."""
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
+    if workers == 1:
+        results = []
+        for index, item in enumerate(items):
+            result = evaluate(item)
+            results.append(result)
+            if on_complete is not None:
+                on_complete(index, result)
+        return results
+
+    results: List[Any] = [None] * len(items)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(evaluate, item): index
+            for index, item in enumerate(items)
+        }
+        for future in as_completed(futures):
+            index = futures[future]
+            result = future.result()
+            results[index] = result
+            if on_complete is not None:
+                on_complete(index, result)
+    return results
+
+
+class SynchronizedEmbeddingModel:
+    """Serialize GPU embedding calls while workers issue LLM requests concurrently."""
+
+    def __init__(self, model: EmbeddingModel) -> None:
+        self._model = model
+        self._lock = Lock()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._model, name)
+
+    def load_model(self, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return self._model.load_model(*args, **kwargs)
+
+
+    def encode(self, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return self._model.encode(*args, **kwargs)
+    def encode_text(self, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return self._model.encode_text(*args, **kwargs)
+
+    def encode_vis_query(self, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return self._model.encode_vis_query(*args, **kwargs)
+
+    def encode_image(self, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return self._model.encode_image(*args, **kwargs)
+
+    def encode_video(self, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return self._model.encode_video(*args, **kwargs)
+
+
+def _query_time(row: Dict[str, Any]) -> int:
+    return int(row["query_time"]["date"][-1] + row["query_time"]["time"].zfill(8))
+
+
+def evaluate_parallel_egolife(
+    rows: List[Dict[str, Any]],
+    args: argparse.Namespace,
+    embedding_model: EmbeddingModel,
+    episodic_caption_files: Dict[str, str],
+    semantic_results: Dict[str, Any],
+    visual_path: str,
+    episodic_captions_30sec: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Run time-ordered questions with one mutable WorldMemory per worker thread."""
+    cache_root = args.cache_dir or os.path.join(args.output_dir, ".cache", f"egolife_{args.subject}")
+    os.makedirs(cache_root, exist_ok=True)
+    synchronized_embedding_model = SynchronizedEmbeddingModel(embedding_model)
+    worker_state = local()
+    worker_lock = Lock()
+    synchronized_embedding_model.load_model("text")
+    worker_ids = count()
+    worker_memories: List[WorldMemory] = []
+
+    def current_worker() -> Any:
+        if hasattr(worker_state, "memory"):
+            return worker_state
+        with worker_lock:
+            worker_id = next(worker_ids)
+        retriever_model = LLMModel(model_name=args.retriever_model)
+        respond_model = LLMModel(model_name=args.respond_model)
+        memory = WorldMemory(
+            embedding_model=synchronized_embedding_model,
+            retriever_llm_model=retriever_model,
+            respond_llm_model=respond_model,
+            prompt_template_manager=PromptTemplateManager(),
+            episodic_cache_root=os.path.join(cache_root, f"worker-{worker_id}"),
+            max_rounds=args.max_rounds,
+            max_errors=args.max_errors,
+        )
+        memory.set_retrieval_top_k(
+            episodic=args.episodic_top_k,
+            semantic=args.semantic_top_k,
+            visual=args.visual_top_k,
+        )
+        memory.load_episodic_captions(caption_files=episodic_caption_files)
+        memory.load_semantic_triples(data=semantic_results)
+        memory.load_visual_clips(
+            embeddings_path=visual_path,
+            clips_data=episodic_captions_30sec,
+        )
+        worker_state.memory = memory
+        worker_state.retriever_model = retriever_model
+        worker_state.respond_model = respond_model
+        with worker_lock:
+            worker_memories.append(memory)
+        return worker_state
+
+    def evaluate_row(item: Tuple[int, Dict[str, Any]]) -> Tuple[int, Dict[str, Any]]:
+        position, row = item
+        state = current_worker()
+        choices = {
+            label: row[key]
+            for key, label in [("choice_a", "A"), ("choice_b", "B"), ("choice_c", "C"), ("choice_d", "D")]
+            if row.get(key)
+        }
+        query_time = _query_time(row)
+        qa_result: Optional[QAResult] = None
+        started_at = time.perf_counter()
+        tokens_before = usage_total(state.retriever_model, state.respond_model)
+        try:
+            qa_result = state.memory.answer(
+                query=row["question"],
+                choices=choices,
+                until_time=query_time,
+            )
+            response = qa_result.answer
+        except Exception as error:
+            logger.error("Error processing ID %s: %s", row["ID"], error)
+            response = "Error"
+        elapsed_seconds = time.perf_counter() - started_at
+        total_tokens = usage_total(state.retriever_model, state.respond_model) - tokens_before
+        result = {
+            "ID": row["ID"],
+            "type": row["type"],
+            "question": row["question"],
+            "choices": choices,
+            "answer": row["answer"],
+            "response": response,
+            "round_history": qa_result.round_history if qa_result else [],
+            "num_rounds": qa_result.num_rounds if qa_result else 0,
+            "completed": qa_result is not None,
+            "total_tokens": total_tokens,
+            "elapsed_seconds": elapsed_seconds,
+            "evaluate": evaluate_prediction(response, row["answer"], choices),
+            "query_time": query_time,
+            "target_time": parse_target_time(row, episodic_captions_30sec),
+        }
+        return position, result
+
+    chronological_items = sorted(enumerate(rows), key=lambda item: (_query_time(item[1]), item[0]))
+    progress = tqdm(total=len(rows), desc="EgoLifeQA", unit="question")
+
+    def update_progress(_: int, completed: Tuple[int, Dict[str, Any]]) -> None:
+        progress.update(1)
+        progress.set_postfix_str(f"id={completed[1]['ID']}")
+
+    try:
+        completed_rows = evaluate_in_parallel(
+            chronological_items,
+            workers=args.workers,
+            evaluate=evaluate_row,
+            on_complete=update_progress,
+        )
+    finally:
+        progress.close()
+        for memory in worker_memories:
+            memory.cleanup()
+
+    results: List[Optional[Dict[str, Any]]] = [None] * len(rows)
+    for position, result in completed_rows:
+        results[position] = result
+    return [result for result in results if result is not None]
+
+
+def write_parallel_outputs(args: argparse.Namespace, results: List[Dict[str, Any]]) -> None:
+    output_path = os.path.join(
+        args.output_dir,
+        f"{args.retriever_model.replace('-', '_')}_{args.respond_model.replace('-', '_')}",
+        f"egolife_eval_{args.subject}.json",
+    )
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w") as output_file:
+        json.dump(results, output_file, indent=4)
+    report_dir = Path(output_path).parent
+    report_paths = write_report(
+        build_report_rows(results, agent=args.agent, mode=args.mode, model=args.respond_model),
+        report_dir,
+        title="EgoLifeQA Run Report",
+    )
+    correct = sum(bool(result["evaluate"]) for result in results)
+    logger.info("Report saved to: %s", report_paths["html"])
+    logger.info("Evaluation Complete: completed=%s/%s correct=%s accuracy=%.4f results=%s", sum(bool(result["completed"]) for result in results), len(results), correct, correct / len(results) if results else 0, output_path)
+
 def main():
     parser = argparse.ArgumentParser(description="EgoLifeQA Evaluation with WorldMM")
     parser.add_argument("--subject", type=str, default="A1_JAKE", help="Subject ID")
+    parser.add_argument("--workers", type=int, default=1, help="Question-level worker count; use 1 for serial evaluation")
+    parser.add_argument("--question-ids-file", type=str, default=None, help="JSON manifest of EgoLife question IDs")
+    parser.add_argument("--cache-dir", type=str, default=None, help="External cache root for per-worker episodic indexes")
     parser.add_argument("--retriever-model", type=str, default="Qwen3.5-4B", help="LMDeploy model for retrieval")
     parser.add_argument("--respond-model", type=str, default="Qwen3.5-4B", help="LMDeploy model for reasoning and answers")
     parser.add_argument("--max-rounds", type=int, default=5, help="Maximum retrieval rounds")
@@ -201,6 +445,9 @@ def main():
     args = parser.parse_args()
 
     # Initialize models
+    if args.workers < 1:
+        parser.error("--workers must be at least 1")
+
     logger.info("Initializing models...")
     embedding_model = EmbeddingModel()
     retriever_llm_model = LLMModel(
@@ -236,8 +483,7 @@ def main():
     
     eval_data_path = os.path.join(data_dir, f"EgoLifeQA/EgoLifeQA_{subject}.json")
     eval_data = load_json(eval_data_path)
-    if args.limit is not None:
-        eval_data = eval_data[:args.limit]
+    eval_data = select_evaluation_rows(eval_data, args.question_ids_file, args.limit)
     
     # Load episodic captions for all granularities (multiscale memory)
     caption_root = args.caption_dir or data_dir
@@ -260,8 +506,18 @@ def main():
     
     # Load visual embeddings
     visual_path = os.path.join(metadata_dir, f"visual_memory/{subject}/visual_embeddings.pkl")
+
     if args.video_root:
         os.environ["WORLDMM_VIDEO_ROOT"] = args.video_root
+
+    if args.workers > 1:
+        logger.info("Starting %s question(s) with %s independent workers", len(eval_data), args.workers)
+        results = evaluate_parallel_egolife(
+            eval_data, args, embedding_model, episodic_caption_files,
+            semantic_results, visual_path, episodic_captions_30sec,
+        )
+        write_parallel_outputs(args, results)
+        return
     
     # Load data into WorldMemory
     logger.info("Loading data into WorldMemory...")
