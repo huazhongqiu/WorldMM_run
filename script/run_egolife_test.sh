@@ -28,9 +28,66 @@ export WORLDMM_VLM_ATTENTION="${WORLDMM_VLM_ATTENTION:-flash_attention_2}"
 export WORLDMM_EMBEDDING_DEVICE="${WORLDMM_EMBEDDING_DEVICE:-cuda:1}"
 
 mkdir -p "${OUTPUT_DIR}"
+LMDEPLOY_PROFILE="${WORLDMM_LMDEPLOY_PROFILE:-formal-2gpu}"
+AUTO_START_SERVICE="${WORLDMM_EGOLIFE_AUTO_START_SERVICE:-1}"
+STARTUP_TIMEOUT_SECONDS="${WORLDMM_LMDEPLOY_STARTUP_TIMEOUT_SECONDS:-600}"
+LMDEPLOY_LOG="${OUTPUT_DIR}/lmdeploy.log"
+LMDEPLOY_PID=""
+
+is_lmdeploy_ready() {
+  curl --fail --silent --show-error "${WORLDMM_LMDEPLOY_BASE_URL}/models" >/dev/null 2>&1
+}
+
+cleanup_started_service() {
+  local exit_code=$?
+  if [[ -n "${LMDEPLOY_PID}" ]] && kill -0 "${LMDEPLOY_PID}" 2>/dev/null; then
+    echo "========== 服务停止 =========="
+    echo "pid=${LMDEPLOY_PID} reason=evaluation_finished"
+    kill "${LMDEPLOY_PID}" 2>/dev/null || true
+    wait "${LMDEPLOY_PID}" 2>/dev/null || true
+  fi
+  exit "${exit_code}"
+}
+
+wait_for_lmdeploy() {
+  local elapsed=0
+  while (( elapsed < STARTUP_TIMEOUT_SECONDS )); do
+    if is_lmdeploy_ready; then
+      echo "status=ready source=started pid=${LMDEPLOY_PID} waited=${elapsed}s"
+      return 0
+    fi
+    if ! kill -0 "${LMDEPLOY_PID}" 2>/dev/null; then
+      echo "ERROR: LMDeploy exited during startup; recent log follows:" >&2
+      tail -n 80 "${LMDEPLOY_LOG}" >&2 || true
+      return 1
+    fi
+    if (( elapsed == 0 || elapsed % 10 == 0 )); then
+      echo "status=waiting elapsed=${elapsed}s timeout=${STARTUP_TIMEOUT_SECONDS}s log=${LMDEPLOY_LOG}"
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  echo "ERROR: LMDeploy did not become ready within ${STARTUP_TIMEOUT_SECONDS}s; recent log follows:" >&2
+  tail -n 80 "${LMDEPLOY_LOG}" >&2 || true
+  return 1
+}
+
 echo "========== 服务检查 =========="
-curl --fail --silent --show-error "${WORLDMM_LMDEPLOY_BASE_URL}/models" >/dev/null
-echo "status=ready"
+if is_lmdeploy_ready; then
+  echo "status=ready source=existing"
+else
+  if [[ "${AUTO_START_SERVICE}" != "1" ]]; then
+    echo "ERROR: LMDeploy is unavailable at ${WORLDMM_LMDEPLOY_BASE_URL}; set WORLDMM_EGOLIFE_AUTO_START_SERVICE=1 to start it." >&2
+    exit 2
+  fi
+  echo "========== 服务启动 =========="
+  echo "profile=${LMDEPLOY_PROFILE} log=${LMDEPLOY_LOG}"
+  bash "${PROJECT_ROOT}/script/serve_lmdeploy.sh" "${LMDEPLOY_PROFILE}" >"${LMDEPLOY_LOG}" 2>&1 &
+  LMDEPLOY_PID=$!
+  trap cleanup_started_service EXIT
+  wait_for_lmdeploy
+fi
+
 echo "========== 评测配置 =========="
 echo "questions=95 workers=${WORKERS} output=${OUTPUT_DIR}"
 echo "日志将显示每个 worker 的索引、检索轮次与最终答案。"

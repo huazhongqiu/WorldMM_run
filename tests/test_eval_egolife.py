@@ -177,6 +177,18 @@ def test_console_logging_suppresses_http_request_noise() -> None:
     assert logging.getLogger("worldmm.memory").level == logging.ERROR
 
 
+
+
+def test_test_runner_starts_formal_service_when_endpoint_is_unavailable() -> None:
+    script = ROOT / "script" / "run_egolife_test.sh"
+    content = script.read_text(encoding="utf-8")
+
+    assert "WORLDMM_EGOLIFE_AUTO_START_SERVICE" in content
+    assert 'WORLDMM_LMDEPLOY_PROFILE:-formal-2gpu' in content
+    assert 'wait_for_lmdeploy' in content
+    assert 'LMDEPLOY_LOG="${OUTPUT_DIR}/lmdeploy.log"' in content
+    assert '"${PROJECT_ROOT}/script/serve_lmdeploy.sh" "${LMDEPLOY_PROFILE}"' in content
+
 def test_test_runner_defaults_to_worldmm_egolife_output_root() -> None:
     script = ROOT / "script" / "run_egolife_test.sh"
     content = script.read_text(encoding="utf-8")
