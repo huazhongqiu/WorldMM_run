@@ -3,6 +3,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKERS="${WORLDMM_EGOLIFE_WORKERS:-4}"
+MAX_ROUNDS="${WORLDMM_EGOLIFE_MAX_ROUNDS:-5}"
 OUTPUT_DIR="${WORLDMM_EGOLIFE_OUTPUT_ROOT:-/myworkspace/projects/output/worldmm/egolife}/test-$(date +%Y%m%d_%H%M%S)"
 
 while [[ $# -gt 0 ]]; do
@@ -89,7 +90,7 @@ else
 fi
 
 echo "========== 评测配置 =========="
-echo "questions=95 workers=${WORKERS} output=${OUTPUT_DIR}"
+echo "questions=95 workers=${WORKERS} max_rounds=${MAX_ROUNDS} output=${OUTPUT_DIR}"
 echo "日志将显示每个 worker 的索引、检索轮次与最终答案。"
 export PYTHONUNBUFFERED=1
 export TQDM_DISABLE=1
@@ -107,4 +108,5 @@ python "${PROJECT_ROOT}/eval/eval_egolife.py" \
   --respond-model "${WORLDMM_LMDEPLOY_MODEL}" \
   --question-ids-file "${PROJECT_ROOT}/eval/splits/egolife_a1_jake_day6_day7_test.json" \
   --workers "${WORKERS}" \
+  --max-rounds "${MAX_ROUNDS}" \
   --mode test

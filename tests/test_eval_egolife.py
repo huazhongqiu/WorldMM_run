@@ -261,6 +261,40 @@ def test_episodic_index_reports_caption_progress_before_openie_stages() -> None:
         sys.path.remove(str(ROOT / "src"))
 
 
+
+
+def test_world_memory_normalizes_episodic_progress_keyword_arguments() -> None:
+    sys.path.insert(0, str(ROOT / "src"))
+    try:
+        from worldmm.memory.memory import WorldMemory
+
+        class FakeEpisodicMemory:
+            def index(self, _until_time, progress_callback):
+                progress_callback("caption_progress", granularity="30sec", completed=1, total=1)
+
+        memory = WorldMemory.__new__(WorldMemory)
+        memory.indexed_time = 0
+        memory.episodic_memory = FakeEpisodicMemory()
+        memory.semantic_memory = SimpleNamespace(index=lambda _until_time: None)
+        memory.visual_memory = SimpleNamespace(index=lambda _until_time: None)
+        received = []
+
+        WorldMemory.index(memory, 1, progress_callback=lambda event, details: received.append((event, details)))
+
+        assert received == [
+            ("caption_progress", {"granularity": "30sec", "completed": 1, "total": 1})
+        ]
+    finally:
+        sys.path.remove(str(ROOT / "src"))
+
+
+def test_test_runner_explicitly_uses_paper_maximum_of_five_rounds() -> None:
+    script = ROOT / "script" / "run_egolife_test.sh"
+    content = script.read_text(encoding="utf-8")
+
+    assert 'WORLDMM_EGOLIFE_MAX_ROUNDS:-5' in content
+    assert '--max-rounds "${MAX_ROUNDS}"' in content
+
 def test_episodic_index_wires_openie_progress_callback() -> None:
     content = (ROOT / "src" / "worldmm" / "memory" / "episodic" / "memory.py").read_text(encoding="utf-8")
     assert "progress_callback" in content

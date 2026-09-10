@@ -176,8 +176,18 @@ class WorldMemory:
         
         logger.info(f"Indexing all memories up to {transform_timestamp(str(until_time))}")
         
+        # EpisodicMemory emits keyword details, while WorldMemory exposes
+        # the stable (event, details-dict) callback contract to evaluators.
+        episodic_progress_callback = None
+        if progress_callback is not None:
+            def episodic_progress_callback(event: str, **details: Any) -> None:
+                progress_callback(event, details)
+
         # Index each memory type
-        self.episodic_memory.index(until_time, progress_callback=progress_callback)
+        self.episodic_memory.index(
+            until_time,
+            progress_callback=episodic_progress_callback,
+        )
         self.semantic_memory.index(until_time)
         self.visual_memory.index(until_time)
         
