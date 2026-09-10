@@ -1,4 +1,5 @@
 import json
+import logging
 import threading
 import time
 
@@ -134,3 +135,63 @@ def test_test_runner_defaults_to_four_workers() -> None:
     script = ROOT / "script" / "run_egolife_test.sh"
     content = script.read_text(encoding="utf-8")
     assert 'WORLDMM_EGOLIFE_WORKERS:-4' in content
+
+
+def test_workflow_logger_emits_readable_worker_round_and_answer_events() -> None:
+    module = _load_eval_module()
+    lines: list[str] = []
+    progress = module.WorkflowProgressLogger(lines.append)
+
+    progress.start_flow("Worker 2 题目开始", worker=2, question_id="406", run="1/95")
+    progress.round(
+        worker=2,
+        question_id="406",
+        round_num=1,
+        decision="search",
+        memory_type="episodic",
+        search_query="where did the person put the keys",
+        top_k=3,
+    )
+    progress.answer(
+        worker=2,
+        question_id="406",
+        answer="B",
+        rounds=2,
+        total_tokens=1234,
+        elapsed_seconds=4.5,
+    )
+
+    rendered = "\n".join(lines)
+    assert "========== Worker 2 题目开始 ==========" in rendered
+    assert "worker=2 question_id=406 run=1/95" in rendered
+    assert "round=1 action=search memory=episodic top_k=3" in rendered
+    assert "answer=B rounds=2 tokens=1234 elapsed=4.50s" in rendered
+
+
+def test_console_logging_suppresses_http_request_noise() -> None:
+    module = _load_eval_module()
+    module.configure_console_logging()
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert module.logger.level == logging.WARNING
+    assert logging.getLogger("worldmm.memory").level == logging.ERROR
+
+
+def test_test_runner_defaults_to_worldmm_egolife_output_root() -> None:
+    script = ROOT / "script" / "run_egolife_test.sh"
+    content = script.read_text(encoding="utf-8")
+    assert 'WORLDMM_EGOLIFE_OUTPUT_ROOT:-/myworkspace/projects/output/worldmm/egolife' in content
+
+
+
+def test_test_runner_disables_dependency_progress_bars() -> None:
+    script = ROOT / "script" / "run_egolife_test.sh"
+    assert "export TQDM_DISABLE=1" in script.read_text(encoding="utf-8")
+
+
+
+def test_parallel_evaluator_passes_worker_context_to_memory_progress_callback() -> None:
+    content = (ROOT / "eval" / "eval_egolife.py").read_text(encoding="utf-8")
+    assert "progress_callback=on_memory_progress" in content
+    assert "worker=state.worker_id" in content
+    assert "workflow.start_flow(" in content
+    assert "progress.close()" not in content

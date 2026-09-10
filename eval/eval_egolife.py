@@ -19,7 +19,97 @@ from tqdm import tqdm
 import logging
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+def configure_console_logging() -> None:
+    """Keep evaluator output readable while preserving errors from dependencies."""
+    logging.basicConfig(level=logging.INFO)
+    for logger_name in (
+        "httpx",
+        "httpcore",
+        "openai",
+        "hipporag",
+        "sentence_transformers",
+        "worldmm.memory",
+        "worldmm.llm",
+    ):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+    logging.getLogger("worldmm.memory").setLevel(logging.ERROR)
+    logger.setLevel(logging.WARNING)
+
+def compact_text(value: Any, limit: int = 180) -> str:
+    """Render a one-line log value without flooding the console."""
+    text = str(value).replace("\n", " ").replace("\r", " ").strip()
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+class WorkflowProgressLogger:
+    """Serialize concise, human-readable evaluator progress from worker threads."""
+
+    def __init__(self, writer: Optional[Callable[[str], None]] = None) -> None:
+        self._writer = writer or (lambda line: print(line, flush=True))
+        self._lock = Lock()
+
+    def _write(self, line: str) -> None:
+        with self._lock:
+            self._writer(line)
+
+    @staticmethod
+    def _fields(**fields: Any) -> str:
+        return " ".join(
+            f"{key}={compact_text(value)}"
+            for key, value in fields.items()
+            if value is not None
+        )
+
+    def start_flow(self, name: str, **fields: Any) -> None:
+        self._write(f"========== {name} ==========")
+        if fields:
+            self._write(self._fields(**fields))
+
+    def status(self, **fields: Any) -> None:
+        self._write(self._fields(**fields))
+
+    def round(
+        self,
+        *,
+        worker: int,
+        question_id: str,
+        round_num: int,
+        decision: str,
+        memory_type: Optional[str] = None,
+        search_query: Optional[str] = None,
+        top_k: Optional[int] = None,
+    ) -> None:
+        self.start_flow(f"Worker {worker} 第 {round_num} 轮")
+        self.status(
+            worker=worker,
+            question_id=question_id,
+            round=round_num,
+            action=decision,
+            memory=memory_type,
+            top_k=top_k,
+            query=search_query,
+        )
+
+    def answer(
+        self,
+        *,
+        worker: int,
+        question_id: str,
+        answer: str,
+        rounds: int,
+        total_tokens: int,
+        elapsed_seconds: float,
+    ) -> None:
+        self.start_flow(f"Worker {worker} 答案生成")
+        self.status(
+            worker=worker,
+            question_id=question_id,
+            answer=answer,
+            rounds=rounds,
+            tokens=total_tokens,
+            elapsed=f"{elapsed_seconds:.2f}s",
+        )
 
 from reporting import build_report_rows, write_report
 
@@ -295,9 +385,22 @@ def evaluate_parallel_egolife(
     cache_root = args.cache_dir or os.path.join(args.output_dir, ".cache", f"egolife_{args.subject}")
     os.makedirs(cache_root, exist_ok=True)
     synchronized_embedding_model = SynchronizedEmbeddingModel(embedding_model)
+    workflow = WorkflowProgressLogger()
+    completed_count = 0
+    workflow.start_flow("评测开始")
+    workflow.status(
+        questions=len(rows), workers=args.workers, max_rounds=args.max_rounds,
+        episodic_top_k=args.episodic_top_k, semantic_top_k=args.semantic_top_k,
+        visual_top_k=args.visual_top_k,
+    )
+    workflow.start_flow("Embedding 初始化")
+    workflow.status(device=os.environ.get("WORLDMM_EMBEDDING_DEVICE", "cuda:0"), model="text")
+
     worker_state = local()
     worker_lock = Lock()
     synchronized_embedding_model.load_model("text")
+    workflow.status(model="text", status="ready")
+
     worker_ids = count()
     worker_memories: List[WorldMemory] = []
 
@@ -308,6 +411,11 @@ def evaluate_parallel_egolife(
             worker_id = next(worker_ids)
         retriever_model = LLMModel(model_name=args.retriever_model)
         respond_model = LLMModel(model_name=args.respond_model)
+        workflow.start_flow(f"Worker {worker_id} 初始化")
+        workflow.status(
+            worker=worker_id, cache=os.path.join(cache_root, f"worker-{worker_id}"),
+            max_rounds=args.max_rounds,
+        )
         memory = WorldMemory(
             embedding_model=synchronized_embedding_model,
             retriever_llm_model=retriever_model,
@@ -329,6 +437,7 @@ def evaluate_parallel_egolife(
             clips_data=episodic_captions_30sec,
         )
         worker_state.memory = memory
+        worker_state.worker_id = worker_id
         worker_state.retriever_model = retriever_model
         worker_state.respond_model = respond_model
         with worker_lock:
@@ -345,6 +454,39 @@ def evaluate_parallel_egolife(
         }
         query_time = _query_time(row)
         qa_result: Optional[QAResult] = None
+        workflow.start_flow(f"Worker {state.worker_id} 题目开始")
+        workflow.status(
+            worker=state.worker_id, run=f"{position + 1}/{len(rows)}",
+            question_id=row["ID"], query_time=transform_timestamp(str(query_time)),
+            question=compact_text(row["question"], limit=120),
+            choices=" | ".join(f"{label}:{compact_text(value, limit=48)}" for label, value in choices.items()),
+        )
+
+        def on_memory_progress(event: str, details: Dict[str, Any]) -> None:
+            if event == "index_start":
+                workflow.start_flow(f"Worker {state.worker_id} 记忆索引")
+                workflow.status(
+                    worker=state.worker_id, question_id=row["ID"],
+                    until_time=transform_timestamp(str(details["until_time"])),
+                )
+            elif event == "index_complete":
+                workflow.status(worker=state.worker_id, question_id=row["ID"], index="complete")
+            elif event == "round":
+                memory_type = details.get("memory_type")
+                top_k = {
+                    "episodic": args.episodic_top_k,
+                    "semantic": args.semantic_top_k,
+                    "visual": args.visual_top_k,
+                }.get(memory_type)
+                workflow.round(
+                    worker=state.worker_id, question_id=row["ID"],
+                    round_num=details["round_num"], decision=details["decision"],
+                    memory_type=memory_type, search_query=details.get("search_query"), top_k=top_k,
+                )
+            elif event == "answer_generation":
+                workflow.start_flow(f"Worker {state.worker_id} 生成答案")
+                workflow.status(worker=state.worker_id, question_id=row["ID"], rounds=details["round_num"])
+
         started_at = time.perf_counter()
         tokens_before = usage_total(state.retriever_model, state.respond_model)
         try:
@@ -352,10 +494,12 @@ def evaluate_parallel_egolife(
                 query=row["question"],
                 choices=choices,
                 until_time=query_time,
+                progress_callback=on_memory_progress,
             )
             response = qa_result.answer
         except Exception as error:
-            logger.error("Error processing ID %s: %s", row["ID"], error)
+            workflow.start_flow(f"Worker {state.worker_id} 题目失败")
+            workflow.status(worker=state.worker_id, question_id=row["ID"], error=error)
             response = "Error"
         elapsed_seconds = time.perf_counter() - started_at
         total_tokens = usage_total(state.retriever_model, state.respond_model) - tokens_before
@@ -375,14 +519,22 @@ def evaluate_parallel_egolife(
             "query_time": query_time,
             "target_time": parse_target_time(row, episodic_captions_30sec),
         }
+        workflow.answer(
+            worker=state.worker_id, question_id=row["ID"], answer=response,
+            rounds=result["num_rounds"], total_tokens=total_tokens, elapsed_seconds=elapsed_seconds,
+        )
         return position, result
 
     chronological_items = sorted(enumerate(rows), key=lambda item: (_query_time(item[1]), item[0]))
-    progress = tqdm(total=len(rows), desc="EgoLifeQA", unit="question")
 
     def update_progress(_: int, completed: Tuple[int, Dict[str, Any]]) -> None:
-        progress.update(1)
-        progress.set_postfix_str(f"id={completed[1]['ID']}")
+        nonlocal completed_count
+        completed_count += 1
+        workflow.start_flow("评测进度")
+        workflow.status(
+            completed=f"{completed_count}/{len(rows)}", question_id=completed[1]["ID"],
+            correct=completed[1]["evaluate"],
+        )
 
     try:
         completed_rows = evaluate_in_parallel(
@@ -392,7 +544,6 @@ def evaluate_parallel_egolife(
             on_complete=update_progress,
         )
     finally:
-        progress.close()
         for memory in worker_memories:
             memory.cleanup()
 
@@ -418,8 +569,13 @@ def write_parallel_outputs(args: argparse.Namespace, results: List[Dict[str, Any
         title="EgoLifeQA Run Report",
     )
     correct = sum(bool(result["evaluate"]) for result in results)
-    logger.info("Report saved to: %s", report_paths["html"])
-    logger.info("Evaluation Complete: completed=%s/%s correct=%s accuracy=%.4f results=%s", sum(bool(result["completed"]) for result in results), len(results), correct, correct / len(results) if results else 0, output_path)
+    workflow = WorkflowProgressLogger()
+    workflow.start_flow("评测完成")
+    workflow.status(
+        completed=f"{sum(bool(result['completed']) for result in results)}/{len(results)}",
+        correct=correct, accuracy=f"{correct / len(results):.4f}" if results else "n/a",
+        results=output_path, report=report_paths["html"],
+    )
 
 def main():
     parser = argparse.ArgumentParser(description="EgoLifeQA Evaluation with WorldMM")
@@ -443,6 +599,8 @@ def main():
     parser.add_argument("--agent", default="WorldMM")
     parser.add_argument("--limit", type=int, default=None, help="Maximum questions; use only for smoke")
     args = parser.parse_args()
+    configure_console_logging()
+
 
     # Initialize models
     if args.workers < 1:

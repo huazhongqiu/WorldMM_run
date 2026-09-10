@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKERS="${WORLDMM_EGOLIFE_WORKERS:-4}"
-OUTPUT_DIR="${WORLDMM_EGOLIFE_OUTPUT_ROOT:-/myworkspace/projects/output}/egolife/test-$(date +%Y%m%d_%H%M%S)"
+OUTPUT_DIR="${WORLDMM_EGOLIFE_OUTPUT_ROOT:-/myworkspace/projects/output/worldmm/egolife}/test-$(date +%Y%m%d_%H%M%S)"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -28,11 +28,15 @@ export WORLDMM_VLM_ATTENTION="${WORLDMM_VLM_ATTENTION:-flash_attention_2}"
 export WORLDMM_EMBEDDING_DEVICE="${WORLDMM_EMBEDDING_DEVICE:-cuda:1}"
 
 mkdir -p "${OUTPUT_DIR}"
-echo "[EgoLife] checking LMDeploy: ${WORLDMM_LMDEPLOY_BASE_URL}/models"
+echo "========== 服务检查 =========="
 curl --fail --silent --show-error "${WORLDMM_LMDEPLOY_BASE_URL}/models" >/dev/null
-echo "[EgoLife] evaluating 95 VideoSpy Day 6-7 questions with ${WORKERS} workers"
-echo "[EgoLife] live completion progress follows; output: ${OUTPUT_DIR}"
+echo "status=ready"
+echo "========== 评测配置 =========="
+echo "questions=95 workers=${WORKERS} output=${OUTPUT_DIR}"
+echo "日志将显示每个 worker 的索引、检索轮次与最终答案。"
 export PYTHONUNBUFFERED=1
+export TQDM_DISABLE=1
+
 
 python "${PROJECT_ROOT}/eval/eval_egolife.py" \
   --subject A1_JAKE \

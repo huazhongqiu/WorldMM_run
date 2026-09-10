@@ -7,7 +7,7 @@ import copy
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from PIL import Image
 
 from ..llm import LLMModel, PromptTemplateManager
@@ -410,6 +410,7 @@ Retrieved:
         query: str,
         choices: Optional[Dict[str, str]] = None,
         until_time: Optional[int] = None,
+        progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> QAResult:
         """
         Answer a question using iterative memory retrieval.
@@ -427,9 +428,16 @@ Retrieved:
         Returns:
             QAResult with the answer and retrieval history
         """
+        def emit_progress(event: str, **details: Any) -> None:
+            if progress_callback is not None:
+                progress_callback(event, details)
+
+
         # Index if needed
         if until_time and until_time > self.indexed_time:
+            emit_progress("index_start", until_time=until_time)
             self.index(until_time)
+            emit_progress("index_complete", until_time=until_time)
         
         # Format query with choices if provided
         full_query = f"Query: {query}"
@@ -447,7 +455,7 @@ Retrieved:
         
         round_num = 0
         err_count = 0
-        
+
         while round_num < self.max_rounds and err_count < self.max_errors:
             round_num += 1
             logger.info(f"Reasoning round {round_num}")
@@ -479,6 +487,14 @@ Step 2 (only if search): Pick one memory type (episodic/semantic/visual) and for
                 err_count += 1
                 continue
             
+            emit_progress(
+                "round",
+                round_num=round_num,
+                decision=reasoning_output.decision,
+                memory_type=(reasoning_output.selected_memory.memory_type if reasoning_output.selected_memory else None),
+                search_query=(reasoning_output.selected_memory.search_query if reasoning_output.selected_memory else None),
+            )
+
             logger.info(f"Decision: {reasoning_output.decision}")
             
             # Handle decision
@@ -572,6 +588,7 @@ Step 2 (only if search): Pick one memory type (episodic/semantic/visual) and for
                 "text": "\nPlease provide only the final answer from the choices given (e.g., A, B, C, or D)."
             })
         
+        emit_progress("answer_generation", round_num=round_num)
         qa_messages = copy.deepcopy(qa_prompt)
         qa_messages.append({
             "role": "user",
