@@ -19,7 +19,7 @@ class EmbeddingModel:
             vis_model_name: Model name for visual embeddings (defaults to VLM2Vec V2.0)
             device: Device to run models on
         """
-        self.device = device
+        self.device = os.environ.get("WORLDMM_EMBEDDING_DEVICE", device)
         
         # Initialize models lazily
         self._text_model = None

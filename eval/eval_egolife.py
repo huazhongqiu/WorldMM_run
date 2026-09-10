@@ -36,8 +36,16 @@ def normalize(text: str) -> str:
 
 
 def extract_choice_letter(text: str) -> Optional[str]:
-    """Extracts A, B, C... from a prediction like (C), B. Bryan, etc."""
-    match = re.match(r"\(?([A-Za-z])[\.\)]?\s*", text.strip())
+    """Extract a final multiple-choice letter without mistaking reasoning prose for one."""
+    marked_answers = re.findall(
+        r"\b(?:final\s+)?answer\s*(?:is\s*)?[:\-]?\s*\(?([A-Za-z])\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if marked_answers:
+        return marked_answers[-1].upper()
+
+    match = re.match(r"\s*\(?([A-Za-z])(?:[\.\)]|\s*$)", text)
     return match.group(1).upper() if match else None
 
 
