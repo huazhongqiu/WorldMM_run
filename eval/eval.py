@@ -85,6 +85,7 @@ def main():
     parser.add_argument("--output-dir", type=str, default="output", help="Output directory for results")
     parser.add_argument("--duration", type=str, default=None, choices=["short", "medium", "long"], help="Optionally filter by video duration")
     parser.add_argument("--episodic-cache-dir", type=str, default=".cache/videomme", help="Root cache directory for per-video episodic HippoRAG state.")
+    parser.add_argument("--eval-name", type=str, default="videomme", help="Dataset name used in the output filename.")
     args = parser.parse_args()
 
     logger.info("Initializing models...")
@@ -217,7 +218,7 @@ def main():
     output_path = os.path.join(
         args.output_dir,
         f"{args.retriever_model.replace('-','_')}_{args.respond_model.replace('-','_')}",
-        f"videomme_eval{duration_tag}.json",
+        f"{args.eval_name}_eval{duration_tag}.json",
     )
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'w') as f:
