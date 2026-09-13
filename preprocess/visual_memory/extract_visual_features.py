@@ -6,6 +6,7 @@ Supports split processing across multiple GPUs and automatic merging.
 """
 
 import json
+import math
 import pickle
 import numpy as np
 import os
@@ -161,6 +162,13 @@ def process_caption_dir(
 
         embeddings_dict: Dict[str, np.ndarray] = {}
 
+        # Frame-rate-aware nframes clamping: low-fps sources (e.g. 1 fps
+        # frame-derived mp4s) only expose ~10 frames per 10 s clip, and the
+        # decord backend hard-fails when asked for more frames than a clip
+        # contains. Cache per-video (total_frames, fps) to compute the
+        # per-clip budget.
+        video_meta: Dict[str, tuple] = {}
+
         for entry in entries:
             vp = entry.get('video_path', '')
             start_time = str(entry.get('start_time', ''))
@@ -172,10 +180,30 @@ def process_caption_dir(
             end_sec = _time_str_to_seconds(end_time)
             key = start_time
 
+            if vp not in video_meta:
+                from decord import VideoReader, cpu
+                vr = VideoReader(vp, ctx=cpu(0))
+                video_meta[vp] = (len(vr), float(vr.get_avg_fps()))
+            total_frames, video_fps = video_meta[vp]
+            # Mirror qwen_vl_utils' frame-range math exactly (ceil/floor +
+            # total-1 clamp), then choose an EVEN nframes <= available frames
+            # (smart_nframes rounds up to FRAME_FACTOR=2, which overflows when
+            # the clip holds an odd number of frames).
+            max_duration = total_frames / video_fps
+            start_frame = int(math.ceil(max(0.0, min(start_sec, max_duration)) * video_fps))
+            end_frame = min(int(math.floor(max(0.0, min(end_sec, max_duration)) * video_fps)), total_frames - 1)
+            available = end_frame - start_frame + 1 if end_frame >= start_frame else 0
+            clip_nframes = min(num_frames, available)
+            clip_nframes -= clip_nframes % 2
+            if clip_nframes < 2:
+                logger.warning(f"  Skipping {video_id} segment {start_time}-{end_time}: "
+                               f"only {available} frame(s) in range at {video_fps} fps")
+                continue
+
             video_spec = {"video": vp, "video_start": start_sec, "video_end": end_sec}
             try:
                 embedding = embedding_model.encode_video(
-                    [video_spec], nframes=num_frames, batch_size=1,
+                    [video_spec], nframes=clip_nframes, batch_size=1,
                 )
                 embeddings_dict[key] = embedding[0]
             except Exception as e:

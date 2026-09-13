@@ -20,6 +20,10 @@ class EmbeddingModel:
             device: Device to run models on
         """
         self.device = os.environ.get("WORLDMM_EMBEDDING_DEVICE", device)
+        # The vision encoder (VLM2Vec) is only needed per retrieval query, so it
+        # can live on a separate (e.g. CPU) device when the GPU is shared with
+        # the LLM server and the text embedding model on a single card.
+        self.vis_device = os.environ.get("WORLDMM_VIS_EMBEDDING_DEVICE", self.device)
         
         # Initialize models lazily
         self._text_model = None
@@ -49,7 +53,7 @@ class EmbeddingModel:
             from .vlm2vecv2 import VLM2VecV2EmbeddingModel as VisEmbeddingModel
             self._vis_model = VisEmbeddingModel(
                 model_name=self.vis_model_name,
-                device=self.device
+                device=self.vis_device
             )
         return self._vis_model
 

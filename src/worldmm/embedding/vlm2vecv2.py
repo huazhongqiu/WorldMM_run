@@ -50,6 +50,13 @@ class VLM2VecV2EmbeddingModel:
     
     def _load_model(self):
         """Load the VLM2Vec V2.0 model and processor"""
+        # flash-attn only ships CUDA kernels; fall back to sdpa when the vision
+        # encoder is placed on CPU (WORLDMM_VIS_EMBEDDING_DEVICE=cpu).
+        if str(self.device).startswith("cpu") and os.environ.get(
+            "WORLDMM_VLM_ATTENTION", "flash_attention_2"
+        ) == "flash_attention_2":
+            os.environ["WORLDMM_VLM_ATTENTION"] = "sdpa"
+
         # Set up model arguments
         model_args = ModelArguments(
             model_name=self.base_model_name,
