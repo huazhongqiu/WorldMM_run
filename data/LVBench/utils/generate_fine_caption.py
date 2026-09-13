@@ -329,7 +329,7 @@ def main() -> None:
     parser.add_argument("--model", type=str, default="Qwen3.5-4B", help="LMDeploy model name.")
     parser.add_argument("--unit-time", type=int, default=10, help="Segment length in seconds.")
     parser.add_argument("--sample-fps", type=float, default=1.0, help="Frame sampling rate per segment.")
-    parser.add_argument("--max-frame-longest-edge", type=int, default=1280, help="Resize frames so the longest edge is at most this (0 disables).")
+    parser.add_argument("--max-frame-longest-edge", type=int, default=0, help="Resize frames so the longest edge is at most this (0 = native resolution, same as original source code; e.g. 1280 roughly halves runtime).")
     parser.add_argument("--max-workers", type=int, default=16, help="Max concurrent segment requests per video.")
     parser.add_argument("--retries", type=int, default=3, help="Retries per segment on transient errors.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing caption files.")

@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 import os
 from typing import Any
 
 from openai import OpenAI
+from pydantic import ValidationError
+
+# Preprocessing runs thousands of requests per phase; httpx logs every one at
+# INFO and floods the run logs, so keep transport noise out of the handlers.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 class LMDeployConfigurationError(ValueError):
@@ -94,6 +101,25 @@ class LMDeployModel:
     def usage_snapshot(self) -> dict[str, int]:
         return dict(self.usage)
 
+    @staticmethod
+    def _json_payload(content: str) -> str:
+        """Best-effort extraction of the JSON document from a model reply.
+
+        Qwen models sometimes wrap JSON in markdown fences or add prose around
+        it; ``model_validate_json`` rejects both, so strip them before parsing.
+        """
+        text = content.strip()
+        if text.startswith("```"):
+            text = text.strip("`").lstrip()
+            if "\n" in text:
+                text = text.split("\n", 1)[1]
+        start = min((i for i in (text.find("{"), text.find("[")) if i != -1), default=-1)
+        if start > 0:
+            end = max(text.rfind("}"), text.rfind("]"))
+            if end > start:
+                text = text[start : end + 1]
+        return text
+
     def generate(self, prompt: Any, text_format: Any | None = None, **kwargs: Any) -> Any:
         options = {**self.request_options, **kwargs}
         response = self.sync_client.chat.completions.create(
@@ -105,4 +131,7 @@ class LMDeployModel:
         content = response.choices[0].message.content or ""
         if text_format is None:
             return content
-        return text_format.model_validate_json(content)
+        try:
+            return text_format.model_validate_json(content)
+        except ValidationError:
+            return text_format.model_validate_json(self._json_payload(content))

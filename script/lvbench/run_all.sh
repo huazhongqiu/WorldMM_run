@@ -12,6 +12,8 @@
 # Everything resumes: re-running skips already-completed artifacts.
 # Model serving matches videospy exactly (lmdeploy 0.14.0, pytorch backend,
 # tp=1, max-batch-size 8, cache-max-entry-count 0.8) — one instance per GPU.
+# Single-GPU (e.g. 1x4090) works too: GPU_LIST=0 automatically lowers the KV
+# cache ratio when the text embedding model must share the card (semantic/eval).
 # ============================================================================
 set -euo pipefail
 
@@ -30,12 +32,14 @@ SCRATCH="${WORLDMM_LVBENCH_SCRATCH:-/workspace/worldmm/lvbench}"
 OUTPUT_DIR="${WORLDMM_LVBENCH_OUTPUT:-/myworkspace/projects/output/worldmm/lvbench}"
 
 SAMPLE_FPS="${SAMPLE_FPS:-1.0}"                # caption frame sampling rate (0.5 = faster)
-MAX_FRAME_EDGE="${MAX_FRAME_EDGE:-1280}"       # caption frame resize (longest edge; 0 = native)
+MAX_FRAME_EDGE="${MAX_FRAME_EDGE:-0}"          # caption frame resize (longest edge; 0 = native resolution, same as original source code)
 NUM_FRAMES="${NUM_FRAMES:-16}"                 # frames per 10s clip for VLM2Vec visual memory
 CAPTION_WORKERS="${CAPTION_WORKERS:-16}"       # concurrent segment requests per caption client
 NUM_SHARDS="${NUM_SHARDS:-0}"                  # 0 = auto (2 per server instance)
 CAPTION_ATTEMPTS="${CAPTION_ATTEMPTS:-2}"      # passes over failed videos
 BASE_PORT="${BASE_PORT:-23333}"
+CACHE_RATIO="${CACHE_RATIO:-0.8}"              # KV cache ratio for LLM-only phases (multi-GPU default = videospy config)
+COLOCATED_CACHE_RATIO="${COLOCATED_CACHE_RATIO:-0.35}"  # KV ratio when the embedding model shares the only GPU (semantic/eval on 1 GPU)
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-900}"
 WITH_EVAL="${WITH_EVAL:-0}"                    # 1 = also run eval on the 315 questions after preprocessing
 SMOKE="${SMOKE:-0}"                            # 1 = 3-minute clip + 3 questions, scratch outputs only
@@ -65,6 +69,13 @@ WATCHER_PID=""
 log()  { echo -e "${BLUE}[run_all]${NC} $*"; }
 ok()   { echo -e "${GREEN}[run_all]${NC} $*"; }
 fail() { echo -e "${RED}[run_all]${NC} $*" >&2; }
+banner() {
+    # Prominent phase separator, visible even in interleaved pod/kubectl logs.
+    echo ""
+    echo "=============================================================="
+    echo "  [run_all] $*  ($(date '+%Y-%m-%d %H:%M:%S'))"
+    echo "=============================================================="
+}
 
 cleanup() {
     local exit_code=$?
@@ -88,9 +99,12 @@ resolve_gpus() {
         list="$(seq -s, 0 $((n - 1)))"
     fi
     IFS=',' read -r -a GPUS <<< "${list}"
-    if (( ${#GPUS[@]} < 2 )); then
-        fail "Need at least 2 GPUs (dual-GPU confirmed plan); got GPU_LIST=${GPU_LIST}"
+    if (( ${#GPUS[@]} < 1 )); then
+        fail "No usable GPU in GPU_LIST=${GPU_LIST}"
         exit 2
+    fi
+    if (( ${#GPUS[@]} == 1 )); then
+        log "Single-GPU mode (${GPUS[0]}): LLM server and embedding model will share the card during semantic/eval (KV cache ratio ${COLOCATED_CACHE_RATIO})"
     fi
 }
 
@@ -100,14 +114,15 @@ is_port_ready() {
 }
 
 start_server_on_gpu() {
-    # $1 = gpu id, $2 = port ; sets SERVER_MODE to "started" or "reused"
-    local gpu="$1" port="$2"
+    # $1 = gpu id, $2 = port, $3 = KV cache ratio (optional, default CACHE_RATIO)
+    # sets SERVER_MODE to "started" or "reused"
+    local gpu="$1" port="$2" ratio="${3:-${CACHE_RATIO}}"
     if is_port_ready "${port}"; then
         log "Port ${port} already serving ${MODEL} — reusing existing instance"
         SERVER_MODE="reused"
         return 0
     fi
-    log "Starting LMDeploy (videospy config) on GPU ${gpu}, port ${port} ..."
+    log "Starting LMDeploy (videospy config) on GPU ${gpu}, port ${port}, cache-max-entry-count ${ratio} ..."
     CUDA_VISIBLE_DEVICES="${gpu}" "${LMDEPLOY_BIN}" serve api_server "${MODEL_PATH}" \
         --backend pytorch \
         --tp 1 \
@@ -115,7 +130,7 @@ start_server_on_gpu() {
         --server-port "${port}" \
         --model-name "${MODEL}" \
         --max-batch-size 8 \
-        --cache-max-entry-count 0.8 \
+        --cache-max-entry-count "${ratio}" \
         --trust-remote-code \
         --reasoning-parser default \
         --tool-call-parser qwen3coder \
@@ -214,6 +229,7 @@ PYEOF
 
 # ============================ phases ============================================
 phase_prepare() {
+    banner "PHASE 0/5 — prepare (QA conversion)"
     mkdir -p "${LOG_DIR}" "${SHARD_DIR}" "${ROOT_QA}"
     if [[ ! -f "${ROOT_QA}/lvbench_test.json" || "${FORCE_PREPARE:-0}" == "1" ]]; then
         log "Phase prepare: converting LVBench QA (videospy test split) ..."
@@ -301,47 +317,49 @@ run_sharded_clients() {
 
 cmd_for_shard() {
     local phase="$1" i="$2" log_file="$3"
-    case "${phase}" in
-        caption)
-            "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/data/LVBench/utils/generate_fine_caption.py" \
-                --video-path "${VIDEO_ROOT}" \
-                --video-list "${SHARD_DIR}/caption/shard_${i}.json" \
-                --output-path "${ROOT_CAPTION}" \
-                --model "${MODEL}" \
-                --unit-time 10 \
-                --sample-fps "${SAMPLE_FPS}" \
-                --max-frame-longest-edge "${MAX_FRAME_EDGE}" \
-                --max-workers "${CAPTION_WORKERS}" \
-                --retries 3 \
-                2>&1 | tee "${log_file}"
-            ;;
-        multiscale)
-            local farm="${SHARD_DIR}/multiscale/farm_${i}"
-            make_symlink_farm "${ROOT_CAPTION}" "${SHARD_DIR}/multiscale/shard_${i}.json" "${farm}"
-            "${WORLDMM_PYTHON}" -m worldmm.memory.episodic.multiscale \
-                --caption_dir "${farm}" \
-                --model "${MODEL}" \
-                --windows "30,180,600" \
-                --granularity_names "30sec,3min,10min" \
-                --perspective general \
-                2>&1 | tee "${log_file}"
-            ;;
-        episodic)
-            local farm="${SHARD_DIR}/episodic/farm_${i}"
-            make_symlink_farm "${ROOT_CAPTION}" "${SHARD_DIR}/episodic/shard_${i}.json" "${farm}"
-            "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/preprocess/build_memory.py" \
-                --caption-dir "${farm}" \
-                --output-dir "${ROOT_METADATA}" \
-                --model "${MODEL}" \
-                --step episodic \
-                2>&1 | tee "${log_file}"
-            ;;
-        *) echo "unknown phase ${phase}" >&2; return 1 ;;
-    esac
+    {
+        echo "=============================================================="
+        echo "=== ${phase} shard${i} started at $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "=============================================================="
+        case "${phase}" in
+            caption)
+                "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/data/LVBench/utils/generate_fine_caption.py" \
+                    --video-path "${VIDEO_ROOT}" \
+                    --video-list "${SHARD_DIR}/caption/shard_${i}.json" \
+                    --output-path "${ROOT_CAPTION}" \
+                    --model "${MODEL}" \
+                    --unit-time 10 \
+                    --sample-fps "${SAMPLE_FPS}" \
+                    --max-frame-longest-edge "${MAX_FRAME_EDGE}" \
+                    --max-workers "${CAPTION_WORKERS}" \
+                    --retries 3
+                ;;
+            multiscale)
+                local farm="${SHARD_DIR}/multiscale/farm_${i}"
+                make_symlink_farm "${ROOT_CAPTION}" "${SHARD_DIR}/multiscale/shard_${i}.json" "${farm}"
+                "${WORLDMM_PYTHON}" -m worldmm.memory.episodic.multiscale \
+                    --caption_dir "${farm}" \
+                    --model "${MODEL}" \
+                    --windows "30,180,600" \
+                    --granularity_names "30sec,3min,10min" \
+                    --perspective general
+                ;;
+            episodic)
+                local farm="${SHARD_DIR}/episodic/farm_${i}"
+                make_symlink_farm "${ROOT_CAPTION}" "${SHARD_DIR}/episodic/shard_${i}.json" "${farm}"
+                "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/preprocess/build_memory.py" \
+                    --caption-dir "${farm}" \
+                    --output-dir "${ROOT_METADATA}" \
+                    --model "${MODEL}" \
+                    --step episodic
+                ;;
+            *) echo "unknown phase ${phase}" >&2; return 1 ;;
+        esac
+    } 2>&1 | tee "${log_file}"
 }
 
 phase_caption() {
-    log "Phase captions (${SAMPLE_FPS} fps, longest-edge ${MAX_FRAME_EDGE}) ..."
+    banner "PHASE 1/5 — captions (${SAMPLE_FPS} fps, longest-edge ${MAX_FRAME_EDGE})"
     local num="${NUM_SHARDS}"
     [[ "${num}" == "0" ]] && num=$((2 * ${#GPUS[@]}))
     mkdir -p "${SHARD_DIR}/caption"
@@ -362,7 +380,7 @@ phase_caption() {
 }
 
 phase_multiscale() {
-    log "Phase multiscale (30sec/3min/10min summaries) ..."
+    banner "PHASE 2/5 — multiscale summaries (30sec/3min/10min)"
     local num="${NUM_SHARDS}"
     [[ "${num}" == "0" ]] && num=$((2 * ${#GPUS[@]}))
     mkdir -p "${SHARD_DIR}/multiscale"
@@ -372,7 +390,7 @@ phase_multiscale() {
 }
 
 phase_episodic() {
-    log "Phase episodic (NER + OpenIE triples) ..."
+    banner "PHASE 3/5 — episodic memory (NER + OpenIE triples)"
     local num="${NUM_SHARDS}"
     [[ "${num}" == "0" ]] && num=$((2 * ${#GPUS[@]}))
     mkdir -p "${SHARD_DIR}/episodic"
@@ -382,12 +400,26 @@ phase_episodic() {
 }
 
 phase_semantic() {
-    # keep server on GPUS[0] only; load text embedding on the last GPU
-    log "Phase semantic (extraction + consolidation; embedding on GPU ${GPUS[-1]}, LLM on port ${BASE_PORT}) ..."
-    local i
-    for i in "${!GPUS[@]}"; do
-        if (( i > 0 )); then stop_server_by_port "$((BASE_PORT + i))"; fi
-    done
+    banner "PHASE 4/5 — semantic memory (extraction + consolidation)"
+    if (( ${#GPUS[@]} == 1 )); then
+        # Single GPU: the LLM server and the text embedding model must share the
+        # card, so restart the server with a smaller KV cache to avoid OOM.
+        stop_all_servers
+        start_server_on_gpu "${GPUS[0]}" "${BASE_PORT}" "${COLOCATED_CACHE_RATIO}"
+        if [[ "${SERVER_MODE}" == "started" ]]; then
+            wait_for_port "${BASE_PORT}" "${STARTUP_TIMEOUT}"
+        elif [[ "${SERVER_MODE}" == "reused" ]]; then
+            log "WARNING: reusing an external server with its own KV cache setting; if the GPU is tight, restart it with --cache-max-entry-count ${COLOCATED_CACHE_RATIO}"
+        fi
+        log "Single-GPU layout: LLM server + text embedding share GPU ${GPUS[0]} (cache ratio ${COLOCATED_CACHE_RATIO})"
+    else
+        # keep server on GPUS[0] only; load text embedding on the last GPU
+        log "Multi-GPU layout: LLM on port ${BASE_PORT} (GPU ${GPUS[0]}), embedding on GPU ${GPUS[-1]}"
+        local i
+        for i in "${!GPUS[@]}"; do
+            if (( i > 0 )); then stop_server_by_port "$((BASE_PORT + i))"; fi
+        done
+    fi
     CUDA_VISIBLE_DEVICES="${GPUS[-1]}" WORLDMM_EMBEDDING_DEVICE=cuda:0 \
         "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/preprocess/build_memory.py" \
             --caption-dir "${ROOT_CAPTION}" \
@@ -398,7 +430,7 @@ phase_semantic() {
 }
 
 phase_visual() {
-    log "Phase visual (VLM2Vec, ${NUM_FRAMES} frames/clip, servers stopped) ..."
+    banner "PHASE 5/5 — visual memory (VLM2Vec, ${NUM_FRAMES} frames/clip)"
     stop_all_servers
     "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/preprocess/build_memory.py" \
         --caption-dir "${ROOT_CAPTION}" \
@@ -411,13 +443,23 @@ phase_visual() {
 }
 
 phase_eval() {
-    log "Phase eval (${EVAL_NAME}) ..."
+    banner "PHASE eval — LVBench (${EVAL_NAME}, $(grep -c video_id "${ROOT_QA}/lvbench_test.json" 2>/dev/null || echo '?') questions)"
     stop_all_servers
-    start_server_on_gpu "${GPUS[0]}" "${BASE_PORT}"
+    local eval_ratio="${CACHE_RATIO}"
+    if (( ${#GPUS[@]} == 1 )); then
+        eval_ratio="${COLOCATED_CACHE_RATIO}"
+        log "Single-GPU layout: LLM server + text embedding share GPU ${GPUS[0]} (cache ratio ${eval_ratio})"
+    fi
+    start_server_on_gpu "${GPUS[0]}" "${BASE_PORT}" "${eval_ratio}"
     if [[ "${SERVER_MODE}" == "started" ]]; then
         wait_for_port "${BASE_PORT}" "${STARTUP_TIMEOUT}"
     fi
-    CUDA_VISIBLE_DEVICES="${GPUS[0]},${GPUS[-1]}" WORLDMM_EMBEDDING_DEVICE=cuda:1 \
+    local eval_cvd="${GPUS[0]},${GPUS[-1]}" eval_emb_device="cuda:1"
+    if (( ${#GPUS[@]} == 1 )); then
+        eval_cvd="${GPUS[0]}"
+        eval_emb_device="cuda:0"
+    fi
+    CUDA_VISIBLE_DEVICES="${eval_cvd}" WORLDMM_EMBEDDING_DEVICE="${eval_emb_device}" \
         WORLDMM_LVBENCH_USAGE_FILE="${EVAL_OUT}/token_usage.json" \
         "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/data/LVBench/utils/run_eval.py" \
             --eval-json "${ROOT_QA}/lvbench_test.json" \
@@ -469,6 +511,7 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 
 log "========== WorldMM x LVBench preprocessing =========="
 log "gpus=${GPUS[*]} model=${MODEL} (${MODEL_PATH})"
+log "cache_ratio=${CACHE_RATIO} colocated_cache_ratio=${COLOCATED_CACHE_RATIO}"
 log "video_root=${VIDEO_ROOT}"
 log "output_root=${LVBENCH_ROOT} scratch=${SCRATCH} eval_out=${OUTPUT_DIR}"
 log "sample_fps=${SAMPLE_FPS} max_frame_edge=${MAX_FRAME_EDGE} num_frames=${NUM_FRAMES} with_eval=${WITH_EVAL} smoke=${SMOKE}"
@@ -477,21 +520,21 @@ phase_prepare
 if [[ "${SMOKE}" == "1" ]]; then setup_smoke; fi
 
 progress_watcher
-log "Starting ${#GPUS[@]} LMDeploy instance(s) ..."
+banner "SERVERS — starting ${#GPUS[@]} LMDeploy instance(s)"
 SERVER_MODES=()
 start_all_servers
 
-phase_caption
-phase_multiscale
-phase_episodic
-phase_semantic
-phase_visual
+phase_caption && ok ">>> captions DONE" || { fail "Pipeline stopped: captions failed"; exit 1; }
+phase_multiscale && ok ">>> multiscale DONE" || { fail "Pipeline stopped: multiscale failed"; exit 1; }
+phase_episodic && ok ">>> episodic DONE" || { fail "Pipeline stopped: episodic failed"; exit 1; }
+phase_semantic && ok ">>> semantic DONE" || { fail "Pipeline stopped: semantic failed"; exit 1; }
+phase_visual && ok ">>> visual DONE" || { fail "Pipeline stopped: visual failed"; exit 1; }
 
 if [[ "${WITH_EVAL}" == "1" || "${SMOKE}" == "1" ]]; then
     phase_eval
 fi
 
-ok "========== DONE =========="
+banner "DONE — all requested phases finished"
 MODEL="${MODEL}" WORLDMM_LVBENCH_ROOT="${WORLDMM_LVBENCH_ROOT}" bash "${PROJECT_ROOT}/script/lvbench/check_progress.sh"
 if [[ "${SMOKE}" == "1" ]]; then
     ok "Smoke eval output: ${EVAL_OUT}"

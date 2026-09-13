@@ -41,9 +41,11 @@ CUDA_VISIBLE_DEVICES=<gpu> lmdeploy serve api_server /myworkspace/models/Qwen/Qw
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `GPU_LIST` | `0,1` | 使用的 GPU；`auto` 自动探测全部卡。每卡一个 LMDeploy 实例 |
+| `GPU_LIST` | `0,1` | 使用的 GPU；`auto` 自动探测全部卡。每卡一个 LMDeploy 实例；**单卡（如 1×4090）填 `GPU_LIST=0` 即可** |
+| `CACHE_RATIO` | `0.8` | LLM 独占卡时的 KV cache 比例（videospy 同款） |
+| `COLOCATED_CACHE_RATIO` | `0.35` | 单卡模式下 semantic/eval 阶段 LLM 服务与 embedding 模型共享显存时的 KV cache 比例（自动以小缓存重启服务） |
 | `SAMPLE_FPS` | `1.0` | caption 抽帧率；`0.5` 可显著提速（约省一半时间） |
-| `MAX_FRAME_EDGE` | `1280` | caption 帧分辨率上限（最长边，像素），控制视觉 token 量；`0` 表示不缩放 |
+| `MAX_FRAME_EDGE` | `0` | caption 帧分辨率上限（最长边，像素）。**默认 0 = 原生分辨率，与原版源代码行为一致**；设 `1280` 可把视觉 token 量降到约 1/2.3，caption 阶段耗时约减半（论文未规定帧分辨率，属可选提速项） |
 | `NUM_FRAMES` | `16` | visual memory 每个 10s 片段编码的帧数（Video-MME 脚本用 10） |
 | `NUM_SHARDS` | 自动=2×卡数 | caption/multiscale/episodic 的客户端分片数 |
 | `CAPTION_WORKERS` | `16` | 每个分片内并发请求的段数 |
@@ -92,7 +94,8 @@ SMOKE=1 bash script/lvbench/run_all.sh
 
 ## 注意事项
 
-- 需要 ≥2 张 GPU（semantic/eval 阶段 1 卡跑 LMDeploy、另 1 卡跑 embedding）。
-- 若端口 23333 已有可用实例，脚本会直接复用且**不会**替你关掉它；此时请确保最后一卡未被该实例占用。
+- 支持**单卡**（如 1×4090）：`GPU_LIST=0 bash script/lvbench/run_all.sh`。semantic / eval 阶段会把 LMDeploy 的 KV cache 自动降到 `COLOCATED_CACHE_RATIO`（默认 0.35）并重启服务，给 Qwen3-Embedding-4B 腾显存；caption/multiscale/episodic 阶段仍用满 `CACHE_RATIO`。多卡行为与之前完全一致。
+- 日志里不再出现 `INFO:httpx:HTTP Request ...` 刷屏（已在 `worldmm/llm/lmdeploy.py` 统一静音）；每个大阶段开始、每个分片日志开头都有 `====` 分界线。
+- 若端口 23333 已有可用实例，脚本会直接复用且**不会**替你关掉它；此时请确保最后一卡未被该实例占用（单卡模式下 semantic/eval 阶段该实例最好带 `--cache-max-entry-count 0.35`）。
 - caption 段级失败会自动重试 3 次；整视频失败会在下一轮 pass 重试（共 `CAPTION_ATTEMPTS` 轮），重跑命令只补缺失视频。
-- 参考耗时（2×4090）：默认档约 7–10h，`SAMPLE_FPS=0.5 NUM_FRAMES=10` 提速档约 4–6h；更多卡近似线性下降。
+- 参考耗时（2×4090）：源代码对齐档（原生分辨率帧）约 14–20h，提速档 `SAMPLE_FPS=0.5 NUM_FRAMES=10` 或 `MAX_FRAME_EDGE=1280` 约 7–10h；更多卡近似线性下降，单卡（1×4090）约再翻倍。

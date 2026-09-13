@@ -26,9 +26,19 @@ WORLDMM_PYTHON="${WORLDMM_PYTHON:-/opt/conda/envs/worldmm/bin/python}"
 LMDEPLOY_BIN="${LMDEPLOY_BIN:-/opt/conda/envs/llm_deploy/bin/lmdeploy}"
 
 IFS=',' read -r -a GPUS <<< "${GPU_LIST}"
+# Single GPU (e.g. 1x4090): LLM server and the text embedding model share the
+# card, so start the server with a smaller KV cache to leave room for it.
+CACHE_RATIO="${CACHE_RATIO:-0.8}"
+COLOCATED_CACHE_RATIO="${COLOCATED_CACHE_RATIO:-0.35}"
 BLUE='\033[1;34m'; GREEN='\033[1;32m'; NC='\033[0m'
 log() { echo -e "${BLUE}[lvbench-eval]${NC} $*"; }
 ok()  { echo -e "${GREEN}[lvbench-eval]${NC} $*"; }
+banner() {
+    echo ""
+    echo "=============================================================="
+    echo "  [lvbench-eval] $*  ($(date '+%Y-%m-%d %H:%M:%S'))"
+    echo "=============================================================="
+}
 
 SERVER_PID=""
 cleanup() {
@@ -45,10 +55,16 @@ trap cleanup EXIT INT TERM
 is_ready() { curl -fs "http://127.0.0.1:${BASE_PORT}/v1/models" >/dev/null 2>&1; }
 
 mkdir -p "${OUTPUT_DIR}/cache" "${OUTPUT_DIR}/logs"
+banner "LVBench eval — gpus=${GPUS[*]}, model=${MODEL}"
+if (( ${#GPUS[@]} == 1 )); then
+    log "Single-GPU layout: LLM server + text embedding share GPU ${GPUS[0]} (cache ratio ${COLOCATED_CACHE_RATIO})"
+fi
 if is_ready; then
     ok "Existing LMDeploy instance found on port ${BASE_PORT} (reusing)"
 else
-    log "Starting LMDeploy (videospy config) on GPU ${GPUS[0]}, port ${BASE_PORT} ..."
+    local_ratio="${CACHE_RATIO}"
+    (( ${#GPUS[@]} == 1 )) && local_ratio="${COLOCATED_CACHE_RATIO}"
+    log "Starting LMDeploy (videospy config) on GPU ${GPUS[0]}, port ${BASE_PORT}, cache-max-entry-count ${local_ratio} ..."
     CUDA_VISIBLE_DEVICES="${GPUS[0]}" "${LMDEPLOY_BIN}" serve api_server "${MODEL_PATH}" \
         --backend pytorch \
         --tp 1 \
@@ -56,7 +72,7 @@ else
         --server-port "${BASE_PORT}" \
         --model-name "${MODEL}" \
         --max-batch-size 8 \
-        --cache-max-entry-count 0.8 \
+        --cache-max-entry-count "${local_ratio}" \
         --trust-remote-code \
         --reasoning-parser default \
         --tool-call-parser qwen3coder \
@@ -86,22 +102,40 @@ export WORLDMM_VISUAL_EMBEDDING_MODEL="${WORLDMM_VISUAL_EMBEDDING_MODEL:-/mywork
 export WORLDMM_VLM_BACKBONE_MODEL="${WORLDMM_VLM_BACKBONE_MODEL:-/myworkspace/mymodels/Qwen2-VL-2B-Instruct}"
 export WORLDMM_TEXT_ATTENTION="${WORLDMM_TEXT_ATTENTION:-flash_attention_2}"
 export WORLDMM_VLM_ATTENTION="${WORLDMM_VLM_ATTENTION:-flash_attention_2}"
-export WORLDMM_EMBEDDING_DEVICE=cuda:1
+if (( ${#GPUS[@]} == 1 )); then
+    export WORLDMM_EMBEDDING_DEVICE=cuda:0
+else
+    export WORLDMM_EMBEDDING_DEVICE=cuda:1
+fi
 export PYTHONUNBUFFERED=1
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 
 log "Running eval: qa=${LVBENCH_ROOT}/qa/lvbench_test.json, caption=${LVBENCH_ROOT}/caption, metadata=${LVBENCH_ROOT}"
-CUDA_VISIBLE_DEVICES="${GPUS[0]},${GPUS[-1]}" WORLDMM_LVBENCH_USAGE_FILE="${OUTPUT_DIR}/token_usage.json" \
-    "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/data/LVBench/utils/run_eval.py" \
-    --eval-json "${LVBENCH_ROOT}/qa/lvbench_test.json" \
-    --caption-dir "${LVBENCH_ROOT}/caption" \
-    --metadata-dir "${LVBENCH_ROOT}" \
-    --retriever-model "${MODEL}" \
-    --respond-model "${MODEL}" \
-    --episodic-cache-dir "${OUTPUT_DIR}/cache" \
-    --output-dir "${OUTPUT_DIR}" \
-    --eval-name lvbench \
-    2>&1 | tee "${OUTPUT_DIR}/logs/eval_$(date +%Y%m%d_%H%M%S).log"
+if (( ${#GPUS[@]} == 1 )); then
+    CUDA_VISIBLE_DEVICES="${GPUS[0]}" WORLDMM_LVBENCH_USAGE_FILE="${OUTPUT_DIR}/token_usage.json" \
+        "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/data/LVBench/utils/run_eval.py" \
+        --eval-json "${LVBENCH_ROOT}/qa/lvbench_test.json" \
+        --caption-dir "${LVBENCH_ROOT}/caption" \
+        --metadata-dir "${LVBENCH_ROOT}" \
+        --retriever-model "${MODEL}" \
+        --respond-model "${MODEL}" \
+        --episodic-cache-dir "${OUTPUT_DIR}/cache" \
+        --output-dir "${OUTPUT_DIR}" \
+        --eval-name lvbench \
+        2>&1 | tee "${OUTPUT_DIR}/logs/eval_$(date +%Y%m%d_%H%M%S).log"
+else
+    CUDA_VISIBLE_DEVICES="${GPUS[0]},${GPUS[-1]}" WORLDMM_LVBENCH_USAGE_FILE="${OUTPUT_DIR}/token_usage.json" \
+        "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/data/LVBench/utils/run_eval.py" \
+        --eval-json "${LVBENCH_ROOT}/qa/lvbench_test.json" \
+        --caption-dir "${LVBENCH_ROOT}/caption" \
+        --metadata-dir "${LVBENCH_ROOT}" \
+        --retriever-model "${MODEL}" \
+        --respond-model "${MODEL}" \
+        --episodic-cache-dir "${OUTPUT_DIR}/cache" \
+        --output-dir "${OUTPUT_DIR}" \
+        --eval-name lvbench \
+        2>&1 | tee "${OUTPUT_DIR}/logs/eval_$(date +%Y%m%d_%H%M%S).log"
+fi
 
 model_dir="${MODEL//-/_}"
 "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/data/LVBench/utils/make_videospy_report.py" \
