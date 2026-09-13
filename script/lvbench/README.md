@@ -7,8 +7,13 @@
 ## 一条命令跑完（推荐）
 
 ```bash
-cd /myworkspace/projects/WorldMM && \
-nohup bash script/lvbench/run_all.sh 2>&1 | tee /workspace/worldmm/lvbench/logs/run_all_$(date +%Y%m%d_%H%M%S).log
+bash /myworkspace/projects/WorldMM/script/lvbench/launch.sh
+```
+
+前台启动（适合 k8s/集群作业的控制台直接粘贴）：自动创建日志目录（避免外层重定向 `No such file or directory`）、实时显示全部输出（含 `PHASE x/5` 分界横幅和 tqdm 进度），同时完整落盘一份日志；启动时会打印 `tail -f` 路径，供别的终端跟看。所有旋钮照常透传：
+
+```bash
+GPU_LIST=auto bash /myworkspace/projects/WorldMM/script/lvbench/launch.sh
 ```
 
 脚本自动完成：QA 转换 → 拉起 LMDeploy（**与 videospy 完全相同的配置**）→ 10s caption（分片并行）→ 30s/3min/10min 多尺度摘要 → episodic 三元组（NER+OpenIE）→ semantic 抽取+consolidation → visual 嵌入（VLM2Vec）→（可选）eval。全程**断点续跑**：中断/失败后重新执行同一条命令即可跳过已完成部分。
