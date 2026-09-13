@@ -44,7 +44,7 @@ STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-900}"
 WITH_EVAL="${WITH_EVAL:-0}"                    # 1 = also run eval on the 315 questions after preprocessing
 SMOKE="${SMOKE:-0}"                            # 1 = 3-minute clip + 3 questions, scratch outputs only
 SMOKE_DURATION="${SMOKE_DURATION:-180}"
-PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-300}"
+PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-60}"   # seconds between [PROGRESS] board prints
 
 WORLDMM_PYTHON="${WORLDMM_PYTHON:-/opt/conda/envs/worldmm/bin/python}"
 LMDEPLOY_BIN="${LMDEPLOY_BIN:-/opt/conda/envs/llm_deploy/bin/lmdeploy}"
@@ -65,6 +65,9 @@ EVAL_NAME="lvbench"
 SERVER_PIDS=()
 SERVER_PORTS=()
 WATCHER_PID=""
+CURRENT_PHASE=""    # phase shown on the [PROGRESS] board (communicated via ${SCRATCH}/current_phase.txt)
+CURRENT_PREFIX=""
+CURRENT_SHARDS=0
 
 log()  { echo -e "${BLUE}[run_all]${NC} $*"; }
 ok()   { echo -e "${GREEN}[run_all]${NC} $*"; }
@@ -75,6 +78,118 @@ banner() {
     echo "=============================================================="
     echo "  [run_all] $*  ($(date '+%Y-%m-%d %H:%M:%S'))"
     echo "=============================================================="
+}
+
+set_progress_context() {
+    # $1 = phase, $2 = log prefix, $3 = shard count ; read by the [PROGRESS] board
+    CURRENT_PHASE="$1"; CURRENT_PREFIX="$2"; CURRENT_SHARDS="$3"
+    mkdir -p "${SCRATCH}" 2>/dev/null || true
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" > "${SCRATCH}/current_phase.txt" 2>/dev/null || true
+}
+
+show_progress() {
+    # Plain-text progress board (no ANSI codes): one ====== phase ====== group
+    # with 【done/total】 bars, so web log viewers render it cleanly.
+    "${WORLDMM_PYTHON}" - \
+        "${ROOT_QA}" "${ROOT_CAPTION}" "${ROOT_METADATA}" "${MODEL}" \
+        "${SHARD_DIR}" "${LOG_DIR}" "${RUN_TS}" \
+        "${SCRATCH}/current_phase.txt" <<'PYEOF' || true
+import glob, json, os, re, sys
+(qa_root, caption_root, meta_root, model, shard_dir, log_dir, run_ts,
+ status_file) = sys.argv[1:9]
+
+cur_phase, cur_prefix, cur_shards = "", "", 0
+try:
+    cur_phase, cur_prefix, cur_shards = open(status_file).read().split("\t")
+    cur_shards = int(cur_shards)
+except Exception:
+    pass
+if cur_phase == "caption":
+    cur_phase = "captions"
+
+W = 20
+def bar(done, tot):
+    tot = max(1, tot)
+    done = max(0, min(done, tot))
+    filled = done * W // tot
+    return f"【{done:>3}/{tot:<3}】{done * 100 // tot:3d}% " + "█" * filled + "░" * (W - filled)
+
+videos = json.load(open(os.path.join(qa_root, "test_videos.json")))
+total = len(videos)
+
+stages = [
+    ("captions",   caption_root, "10sec.json"),
+    ("multiscale", caption_root, "10min.json"),
+    ("episodic",   os.path.join(meta_root, "episodic_memory"),
+     f"episodic_triple_results_{model}.json"),
+    ("semantic",   os.path.join(meta_root, "semantic_memory"),
+     f"semantic_consolidation_results_{model}.json"),
+    ("visual",     os.path.join(meta_root, "visual_memory"), "visual_embeddings.pkl"),
+]
+shard_subdir = {"captions": "caption", "multiscale": "multiscale", "episodic": "episodic"}
+
+def count_done(root, marker, vid_list=None):
+    if vid_list is None:
+        vid_list = os.listdir(root) if os.path.isdir(root) else []
+    return sum(1 for v in vid_list if os.path.isfile(os.path.join(root, v, marker)))
+
+def tail(path, nbytes=262144):
+    try:
+        size = os.path.getsize(path)
+        with open(path, errors="ignore") as f:
+            if size > nbytes:
+                f.seek(size - nbytes)
+            return f.read()
+    except OSError:
+        return ""
+
+def inflight(name, idx=None):
+    def last(pattern, text, groups):
+        m = None
+        for m in re.finditer(pattern, text):
+            pass
+        return m.groups() if m else None
+    if name in ("captions", "multiscale", "episodic"):
+        lfs = sorted(glob.glob(os.path.join(log_dir, f"{cur_prefix}_shard{idx}_*.log")))
+        if not lfs:
+            return ""
+        text = tail(lfs[-1])
+        if name == "captions":
+            g = last(r"Captioning (\S+?)\.mp4:\s+\d+%[^\n]*?\|\s*(\d+)/(\d+)", text, 3)
+            return f"  进行中 {g[0]} {g[1]}/{g[2]} 段" if g else ""
+        if name == "episodic":
+            g = last(r"(NER|Extracting triples):\s+\d+%[^\n]*?\|\s*(\d+)/(\d+)", text, 3)
+            return f"  进行中 {g[0]} {g[1]}/{g[2]} 块" if g else ""
+        g = last(r"Multiscale memory:\s+\d+%[^\n]*?\|\s*(\d+)/(\d+)", text, 2)
+        if g:
+            v = last(r"video=([A-Za-z0-9_-]+)", text, 1)
+            return f"  进行中 {v[0] if v else ''} {g[0]}/{g[1]} 视频"
+        return ""
+    text = tail(os.path.join(log_dir, f"{cur_prefix}_{run_ts}.log"))
+    g = last(r"\[\s*\d+/\d+\] [^\n:]*?: ([A-Za-z0-9_-]+)", text, 1)
+    return f"  进行中 {g[0]}" if g else ""
+
+for name, root, marker in stages:
+    print(f"====== {name} ======")
+    print("  total  " + bar(count_done(root, marker), total))
+    if name == cur_phase and cur_shards > 0:
+        sdir = os.path.join(shard_dir, shard_subdir[name])
+        shard_files = sorted(glob.glob(os.path.join(sdir, "shard_*.json")),
+                             key=lambda p: int(re.search(r"shard_(\d+)", p).group(1)))
+        for sf in shard_files:
+            try:
+                vids = json.load(open(sf))
+            except Exception:
+                continue
+            idx = re.search(r"shard_(\d+)", sf).group(1)
+            line = f"  shard{idx} " + bar(count_done(root, marker, vids), len(vids))
+            line += inflight(name, idx)
+            print(line)
+    elif name == cur_phase:
+        detail = inflight(name)
+        if detail:
+            print(detail)
+PYEOF
 }
 
 cleanup() {
@@ -293,6 +408,7 @@ PYEOF
 run_sharded_clients() {
     # $1 = phase name; $2 = num shards; $3 = log prefix; then per-shard command via function cmd_for_shard
     local phase="$1" num="$2" log_prefix="$3"
+    set_progress_context "${phase}" "${log_prefix}" "${num}"
     local pids=() names=() i
     for i in $(seq 0 $((num - 1))); do
         local port=$((BASE_PORT + i % ${#GPUS[@]}))
@@ -401,6 +517,7 @@ phase_episodic() {
 
 phase_semantic() {
     banner "PHASE 4/5 — semantic memory (extraction + consolidation)"
+    set_progress_context "semantic" "semantic" 0
     if (( ${#GPUS[@]} == 1 )); then
         # Single GPU: the LLM server and the text embedding model must share the
         # card, so restart the server with a smaller KV cache to avoid OOM.
@@ -431,6 +548,7 @@ phase_semantic() {
 
 phase_visual() {
     banner "PHASE 5/5 — visual memory (VLM2Vec, ${NUM_FRAMES} frames/clip)"
+    set_progress_context "visual" "visual" 0
     stop_all_servers
     "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/preprocess/build_memory.py" \
         --caption-dir "${ROOT_CAPTION}" \
@@ -484,9 +602,10 @@ phase_eval() {
 
 progress_watcher() {
     (
+        show_progress
         while true; do
             sleep "${PROGRESS_INTERVAL}"
-            echo "[PROGRESS] $(WORLDMM_LVBENCH_ROOT="${WORLDMM_LVBENCH_ROOT}" MODEL="${MODEL}" bash "${PROJECT_ROOT}/script/lvbench/check_progress.sh" --oneline)"
+            show_progress
         done
     ) &
     WATCHER_PID=$!
@@ -519,6 +638,7 @@ log "sample_fps=${SAMPLE_FPS} max_frame_edge=${MAX_FRAME_EDGE} num_frames=${NUM_
 phase_prepare
 if [[ "${SMOKE}" == "1" ]]; then setup_smoke; fi
 
+set_progress_context "prepare" "" 0
 progress_watcher
 banner "SERVERS — starting ${#GPUS[@]} LMDeploy instance(s)"
 SERVER_MODES=()

@@ -20,12 +20,23 @@ GPU_LIST=auto bash /myworkspace/projects/WorldMM/script/lvbench/launch.sh
 
 ### 实时进度
 
+启动后控制台实时显示全部输出；此外 run_all 每 60 秒（`PROGRESS_INTERVAL` 可调）自动打印一块**纯文本进度看板**（无 ANSI 转义符，平台网页日志可正常渲染），当前阶段的分组下有 total 和各分片的【完成数/总数】条，并标注分片正在处理的视频及段级进度：
+
+```
+====== captions ======
+  total  【  7/ 20】 35% ███████░░░░░░░░░░░░░
+  shard0 【  2/  5】 40% ████████░░░░░░░░░░░░  进行中 16Z-XQh9jhk 312/503 段
+====== multiscale ======
+  total  【  0/ 20】  0% ░░░░░░░░░░░░░░░░░░░░
+...
+```
+
 ```bash
-# 方式一：跟随主日志（各阶段 tqdm 进度条都在里面）
+# 方式一：跟随主日志（看板 + 各阶段横幅都在里面）
 tail -f /workspace/worldmm/lvbench/logs/run_all_<时间戳>.log
 
-# 方式二：看板（每 5 分钟 run_all 也会自动打印一行 [PROGRESS]）
-watch -n 30 bash /myworkspace/projects/WorldMM/script/lvbench/check_progress.sh
+# 方式二：手动查五阶段完成度
+bash /myworkspace/projects/WorldMM/script/lvbench/check_progress.sh
 ```
 
 ## 模型部署配置（与 videospy 保持一致）
