@@ -66,9 +66,9 @@ def test_completion_counts_distinguishes_success_error_and_missing() -> None:
     module = load_eval_module()
     assert module.completion_counts(
         [
-            {"status": "success"},
-            {"status": "success"},
+            {"status": "success", "response": "A"},
+            {"status": "success", "response": ""},
             {"status": "error"},
             {"status": "missing"},
         ]
-    ) == {"success": 2, "error": 1, "missing": 1, "total": 4}
+    ) == {"success": 1, "error": 2, "missing": 1, "total": 4}
