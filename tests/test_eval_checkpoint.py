@@ -40,7 +40,7 @@ def test_pending_rows_retries_errors_and_skips_only_successes() -> None:
     module = load_eval_module()
     rows = [{"ID": "1"}, {"ID": "2"}, {"ID": "3"}]
     latest = {
-        "1": {"ID": "1", "status": "success"},
+        "1": {"ID": "1", "status": "success", "response": "A"},
         "2": {"ID": "2", "status": "error"},
     }
 

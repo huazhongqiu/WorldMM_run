@@ -79,8 +79,12 @@ def append_result(path: str, result: Dict[str, Any]) -> None:
         handle.write(json.dumps(result, ensure_ascii=False) + "\n")
 
 
+def is_successful_result(result: Dict[str, Any]) -> bool:
+    return result.get("status") == "success" and bool(str(result.get("response", "")).strip())
+
+
 def pending_rows(rows: List[Dict[str, Any]], latest: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [row for row in rows if latest.get(str(row["ID"]), {}).get("status") != "success"]
+    return [row for row in rows if not is_successful_result(latest.get(str(row["ID"]), {}))]
 
 
 def merge_results(rows: List[Dict[str, Any]], latest: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -94,7 +98,12 @@ def completion_counts(results: List[Dict[str, Any]]) -> Dict[str, int]:
     counts = {"success": 0, "error": 0, "missing": 0, "total": len(results)}
     for result in results:
         status = result.get("status", "missing")
-        counts[status if status in counts else "error"] += 1
+        if status == "missing":
+            counts["missing"] += 1
+        elif is_successful_result(result):
+            counts["success"] += 1
+        else:
+            counts["error"] += 1
     return counts
 
 
@@ -244,6 +253,8 @@ def main() -> int:
                     until_time=QUERY_TIME,
                 )
                 response = qa_result.answer
+                if not str(response).strip():
+                    raise ValueError("empty model response")
                 status = "success"
             except Exception as e:
                 logger.error(f"Error answering {row['ID']}: {e}")
