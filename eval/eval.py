@@ -52,6 +52,7 @@ from worldmm.run_log import (
     emit,
     progress,
     question_separator,
+    video_separator,
     section,
 )
 
@@ -240,6 +241,7 @@ def main() -> int:
             if not video_queries:
                 continue
         video_progress.set_postfix(vid=video_id, q=len(video_queries))
+        emit(video_separator(str(video_id)))
         emit(progress("VIDEO", video_index, video_total, f"id={video_id} | questions={len(video_queries)}"))
 
         world_memory.reset()

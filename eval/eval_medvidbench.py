@@ -46,6 +46,7 @@ from worldmm.run_log import (  # noqa: E402
     progress as log_progress,
     question_separator,
     section as log_section,
+    video_separator,
 )
 
 logger = logging.getLogger("medvidbench_eval")
@@ -265,6 +266,7 @@ class Runner:
         with self.print_lock:
             self.completed_units += 1
             unit_current = self.completed_units
+        log_line(video_separator(str(video_id)))
         log_progress(
             "UNIT", unit_current, len(self.groups),
             f"id={video_id} | questions={len(rows)}",

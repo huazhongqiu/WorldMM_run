@@ -37,6 +37,10 @@ def question_separator(question_id: str) -> str:
     return f"\n{'-' * 62}\nQUESTION id={question_id}"
 
 
+def video_separator(video_id: str) -> str:
+    return f"\n{'+' * 29}\nVIDEO id={video_id}"
+
+
 def agent_round(
     round_num: int,
     max_rounds: int,

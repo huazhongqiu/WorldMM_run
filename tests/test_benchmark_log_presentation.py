@@ -27,6 +27,15 @@ def test_question_separator_visibly_delimits_each_question() -> None:
     )
 
 
+
+def test_video_separator_visibly_delimits_each_video() -> None:
+    module = load_run_log()
+
+    assert module.video_separator("LV_001") == (
+        "\n+++++++++++++++++++++++++++++\n"
+        "VIDEO id=LV_001"
+    )
+
 def test_phrase_weight_averaging_skips_nodes_with_no_selected_facts() -> None:
     sys.path.insert(0, str(ROOT / "src"))
     try:
@@ -49,6 +58,7 @@ def test_benchmark_runners_print_one_answer_event_and_question_separator() -> No
         source = path.read_text(encoding="utf-8")
 
         assert "question_separator" in source
+        assert "video_separator" in source
         assert 'details["decision"] != "answer"' in source
 
 
