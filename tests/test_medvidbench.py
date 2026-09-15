@@ -242,3 +242,9 @@ def test_runner_completion_counts_distinguish_success_error_and_missing():
         "missing": 1,
         "total": 4,
     }
+
+
+def test_runner_default_source_path_is_relative_to_checkout():
+    source = (ROOT / "eval" / "eval_medvidbench.py").read_text(encoding="utf-8")
+    assert '"/myworkspace/projects/WorldMM/src"' not in source
+    assert 'Path(__file__).resolve().parents[1] / "src"' in source
