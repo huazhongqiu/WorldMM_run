@@ -105,7 +105,7 @@ def completion_counts(rows: List[Dict[str, Any]], latest: Dict[str, Dict[str, An
         record = latest.get(str(row["ID"]))
         if record is None:
             counts["missing"] += 1
-        elif record.get("status") == "success" and str(record.get("prediction", "")).strip():
+        elif is_successful_record(record):
             counts["success"] += 1
         else:
             counts["error"] += 1
@@ -116,7 +116,7 @@ def is_successful_record(record: Optional[Dict[str, Any]]) -> bool:
     return bool(
         record
         and record.get("status") == "success"
-        and str(record.get("prediction", "")).strip()
+        and answer_status(record.get("prediction")) == "success"
     )
 
 

@@ -229,18 +229,19 @@ def test_runner_initializes_shared_embedding_exactly_once(monkeypatch):
 
 def test_runner_completion_counts_distinguish_success_error_and_missing():
     module = _runner()
-    rows = [{"ID": "1"}, {"ID": "2"}, {"ID": "3"}, {"ID": "4"}]
+    rows = [{"ID": "1"}, {"ID": "2"}, {"ID": "3"}, {"ID": "4"}, {"ID": "5"}]
     latest = {
         "1": {"status": "success", "prediction": "answer"},
         "2": {"status": "success", "prediction": ""},
         "3": {"status": "error", "prediction": ""},
+        "5": {"status": "success", "prediction": "Unable to generate answer"},
     }
 
     assert module.completion_counts(rows, latest) == {
         "success": 1,
-        "error": 2,
+        "error": 3,
         "missing": 1,
-        "total": 4,
+        "total": 5,
     }
 
 
