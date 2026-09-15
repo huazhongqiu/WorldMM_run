@@ -38,6 +38,7 @@ sys.path.insert(0, os.environ.get("WORLDMM_SRC", str(default_src)))
 
 from worldmm.embedding import EmbeddingModel  # noqa: E402
 from worldmm.llm import LLMModel, PromptTemplateManager  # noqa: E402
+from worldmm.medvidbench_output import normalize_prediction  # noqa: E402
 from worldmm.memory import WorldMemory, QAResult  # noqa: E402
 from worldmm.run_log import (  # noqa: E402
     agent_round as log_agent_round,
@@ -144,6 +145,7 @@ def is_successful_record(record: Optional[Dict[str, Any]]) -> bool:
         record
         and record.get("status") == "success"
         and answer_status(record.get("prediction")) == "success"
+        and normalize_prediction(str(record.get("qa_type", "")), record.get("prediction")) is not None
     )
 
 
@@ -374,6 +376,12 @@ class Runner:
                 )
                 response = qa_result.answer
                 status = answer_status(response)
+                if status == "success":
+                    normalized = normalize_prediction(row["type"], response)
+                    if normalized is None:
+                        status = "invalid_format"
+                    else:
+                        response = normalized
             except Exception as exc:
                 logger.error("Error answering %s: %s", row["ID"], exc)
                 response = ""
@@ -432,7 +440,13 @@ class Runner:
     # ---- outputs --------------------------------------------------------------
     def write_outputs(self, run_seconds: float) -> None:
         args = self.args
-        records = {key: rec for key, rec in self.existing.items() if is_successful_record(rec)}
+        records = {
+            key: {**record, "prediction": prediction}
+            for key, record in self.existing.items()
+            if (prediction := normalize_prediction(
+                str(record.get("qa_type", "")), record.get("prediction")
+            )) is not None and is_successful_record(record)
+        }
         results = []
         for row in self.rows:
             rec = records.get(row["ID"])
