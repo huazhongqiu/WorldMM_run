@@ -27,10 +27,12 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, local
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 
 from tqdm import tqdm
 
-sys.path.insert(0, os.environ.get("WORLDMM_SRC", "/myworkspace/projects/WorldMM/src"))
+default_src = Path(__file__).resolve().parents[1] / "src"
+sys.path.insert(0, os.environ.get("WORLDMM_SRC", str(default_src)))
 
 from worldmm.embedding import EmbeddingModel  # noqa: E402
 from worldmm.llm import LLMModel, PromptTemplateManager  # noqa: E402
