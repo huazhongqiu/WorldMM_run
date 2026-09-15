@@ -35,6 +35,9 @@ COLOCATED_CACHE_RATIO="${COLOCATED_CACHE_RATIO:-0.35}"
 BLUE='\033[1;34m'; GREEN='\033[1;32m'; NC='\033[0m'
 log() { echo -e "${BLUE}[lvbench-eval]${NC} $*"; }
 ok()  { echo -e "${GREEN}[lvbench-eval]${NC} $*"; }
+section() {
+    printf "\n============================================================\n %s\n============================================================\n" "$*"
+}
 banner() {
     echo ""
     echo "=============================================================="
@@ -65,6 +68,7 @@ mkdir -p "${OUTPUT_DIR}/cache" "${OUTPUT_DIR}/logs"
 [[ -x "${WORLDMM_PYTHON}" ]] || { echo "ERROR: WorldMM Python is not executable: ${WORLDMM_PYTHON}" >&2; exit 2; }
 [[ -x "${LMDEPLOY_BIN}" ]] || { echo "ERROR: LMDeploy is not executable: ${LMDEPLOY_BIN}" >&2; exit 2; }
 [[ -d "${MODEL_PATH}" ]] || { echo "ERROR: model directory is missing: ${MODEL_PATH}" >&2; exit 2; }
+section "OFFLINE PREFLIGHT"
 "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/eval/validate_precomputed.py" \
     --eval-json "${LVBENCH_ROOT}/qa/lvbench_test.json" \
     --root "${LVBENCH_ROOT}" \
@@ -73,6 +77,7 @@ banner "LVBench eval — gpus=${GPUS[*]}, model=${MODEL}"
 if (( ${#GPUS[@]} == 1 )); then
     log "Single-GPU layout: LLM server + text embedding share GPU ${GPUS[0]} (cache ratio ${COLOCATED_CACHE_RATIO})"
 fi
+section "LLM DEPLOY"
 if endpoint_responding; then
     if served_model_matches; then
         ok "Existing LMDeploy instance found on port ${BASE_PORT} (reusing)"
@@ -95,7 +100,7 @@ else
         --trust-remote-code \
         --reasoning-parser default \
         --tool-call-parser qwen3coder \
-        --log-level REQUEST \
+        --log-level WARNING \
         >"${OUTPUT_DIR}/logs/lmdeploy_eval.log" 2>&1 &
     SERVER_PID=$!
     elapsed=0
@@ -125,6 +130,7 @@ export WORLDMM_VLM_ATTENTION="${WORLDMM_VLM_ATTENTION:-flash_attention_2}"
 export PYTHONUNBUFFERED=1
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 
+section "INFERENCE"
 log "Running eval: qa=${LVBENCH_ROOT}/qa/lvbench_test.json, caption=${LVBENCH_ROOT}/caption, metadata=${LVBENCH_ROOT}"
 eval_cvd="${GPUS[0]},${GPUS[-1]}"
 eval_emb_device="cuda:1"
@@ -165,6 +171,7 @@ done
 (( inference_complete == 1 )) || { echo "ERROR: LVBench inference remains incomplete after ${EVAL_ATTEMPTS} attempts" >&2; exit 1; }
 
 model_dir="${MODEL//-/_}"
+section "EVALUATION"
 "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/data/LVBench/utils/make_videospy_report.py" \
     --eval-json "${OUTPUT_DIR}/${model_dir}_${model_dir}/lvbench_eval.json" \
     --report-dir "${OUTPUT_DIR}/report" \

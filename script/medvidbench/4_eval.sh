@@ -42,6 +42,9 @@ COLOCATED_EVAL_RATIO="${COLOCATED_EVAL_RATIO:-0.30}"
 BLUE='\033[1;34m'; GREEN='\033[1;32m'; NC='\033[0m'
 log() { echo -e "${BLUE}[medvidbench-eval]${NC} $*"; }
 ok()  { echo -e "${GREEN}[medvidbench-eval]${NC} $*"; }
+section() {
+    printf "\n============================================================\n %s\n============================================================\n" "$*"
+}
 banner() {
     echo ""
     echo "=============================================================="
@@ -74,6 +77,7 @@ mkdir -p "${OUTPUT_DIR}/cache" "${OUTPUT_DIR}/logs"
 [[ -d "${MODEL_PATH}" ]] || { echo "ERROR: model directory is missing: ${MODEL_PATH}" >&2; exit 2; }
 [[ -f "${TRAINVAL_JSON}" ]] || { echo "ERROR: ground-truth JSON is missing: ${TRAINVAL_JSON}" >&2; exit 2; }
 [[ -d "${LEADERBOARD_DIR}" ]] || { echo "ERROR: leaderboard evaluator is missing: ${LEADERBOARD_DIR}" >&2; exit 2; }
+section "OFFLINE PREFLIGHT"
 "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/eval/validate_precomputed.py" \
     --eval-json "${MEDVIDBENCH_ROOT}/qa/medvidbench_test.json" \
     --root "${MEDVIDBENCH_ROOT}" \
@@ -82,6 +86,7 @@ banner "MedVidBench eval — gpus=${GPUS[*]}, model=${MODEL}"
 if (( ${#GPUS[@]} == 1 )); then
     log "Single-GPU layout: LLM server + text embedding share GPU ${GPUS[0]} (cache ratio ${COLOCATED_CACHE_RATIO})"
 fi
+section "LLM DEPLOY"
 if endpoint_responding; then
     if served_model_matches; then
         ok "Existing LMDeploy instance found on port ${BASE_PORT} (reusing)"
@@ -104,7 +109,7 @@ else
         --trust-remote-code \
         --reasoning-parser default \
         --tool-call-parser qwen3coder \
-        --log-level REQUEST \
+        --log-level WARNING \
         >"${OUTPUT_DIR}/logs/lmdeploy_eval.log" 2>&1 &
     SERVER_PID=$!
     elapsed=0
@@ -134,6 +139,7 @@ export WORLDMM_VLM_ATTENTION="${WORLDMM_VLM_ATTENTION:-flash_attention_2}"
 export PYTHONUNBUFFERED=1
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 
+section "INFERENCE"
 log "Running eval: qa=${MEDVIDBENCH_ROOT}/qa/medvidbench_test.json, caption=${MEDVIDBENCH_ROOT}/caption, metadata=${MEDVIDBENCH_ROOT}"
 eval_cvd="${GPUS[0]},${GPUS[-1]}"
 eval_emb_device="cuda:1"
@@ -178,12 +184,14 @@ done
 
 judge_args=()
 [[ "${SKIP_LLM_JUDGE}" == "1" ]] && judge_args+=(--skip-llm-judge)
+section "EVALUATION"
 "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/data/MedVidBench/utils/evaluate_medvidbench.py" \
     --run-dir "${OUTPUT_DIR}" \
     --leaderboard-dir "${LEADERBOARD_DIR}" \
     "${judge_args[@]+"${judge_args[@]}"}" \
     2>&1 | tee "${OUTPUT_DIR}/logs/official_eval_$(date +%Y%m%d_%H%M%S).log"
 
+section "REPORT"
 "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/data/MedVidBench/utils/make_report.py" \
     --run-dir "${OUTPUT_DIR}" \
     2>&1 | tee "${OUTPUT_DIR}/logs/report_$(date +%Y%m%d_%H%M%S).log"

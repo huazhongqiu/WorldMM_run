@@ -37,6 +37,13 @@ sys.path.insert(0, os.environ.get("WORLDMM_SRC", str(default_src)))
 from worldmm.embedding import EmbeddingModel  # noqa: E402
 from worldmm.llm import LLMModel, PromptTemplateManager  # noqa: E402
 from worldmm.memory import WorldMemory, QAResult  # noqa: E402
+from worldmm.run_log import (  # noqa: E402
+    agent_round as log_agent_round,
+    answer_status as log_answer_status,
+    emit as log_line,
+    progress as log_progress,
+    section as log_section,
+)
 
 logger = logging.getLogger("medvidbench_eval")
 
@@ -180,6 +187,7 @@ class Runner:
         self.existing = latest_records(self.records_path)
         self.print_lock = Lock()
         self.completed_count = 0
+        self.completed_units = 0
         self.embedding_model: Optional[EmbeddingModel] = None
         self.embedding_init_lock = Lock()
         self.embedding_call_lock = Lock()
@@ -234,6 +242,14 @@ class Runner:
         state = self.current_worker()
         memory: WorldMemory = state.memory
         until_time = max(query_time_int(row) for row in rows)
+
+        with self.print_lock:
+            self.completed_units += 1
+            unit_current = self.completed_units
+        log_progress(
+            "UNIT", unit_current, len(self.groups),
+            f"id={video_id} | questions={len(rows)}",
+        )
 
         memory.reset()
         memory.episodic_memory.save_dir_root = os.path.join(
@@ -309,11 +325,25 @@ class Runner:
             started = time.perf_counter()
             tokens_before = usage_total(state.retriever, state.respond)
             qa_result: Optional[QAResult] = None
+
+            def round_callback(event: str, details: Dict[str, Any]) -> None:
+                if event == "round":
+                    log_line(log_agent_round(
+                        details["round_num"],
+                        args.max_rounds,
+                        details["decision"],
+                        memory_type=details.get("memory_type"),
+                        search_query=details.get("search_query"),
+                    ))
+                elif event == "answer_generation":
+                    log_line(log_agent_round(details["round_num"], args.max_rounds, "answer"))
+
             try:
                 qa_result = memory.answer(
                     query=row["question"],
                     choices=None,
                     until_time=until_time,
+                    progress_callback=round_callback,
                 )
                 response = qa_result.answer
                 status = answer_status(response)
@@ -364,12 +394,13 @@ class Runner:
         self.existing[record["sample_key"]] = record
         with self.print_lock:
             self.completed_count += 1
-            logger.info(
-                "[%d/%d] %s %s status=%s rounds=%s tok=%s %.1fs pred=%s",
-                self.completed_count, len(self.rows), row["ID"], row["type"], status,
-                record["num_rounds"], record["token_usage"]["total_tokens"],
-                record["elapsed_seconds"], compact(response, 80),
-            )
+            log_line(log_answer_status(
+                status.upper(),
+                question_id=row["ID"],
+                answer=compact(response, 80) if status == "success" else "",
+                elapsed_seconds=record["elapsed_seconds"],
+                tokens=record["token_usage"]["total_tokens"],
+            ))
 
     # ---- outputs --------------------------------------------------------------
     def write_outputs(self, run_seconds: float) -> None:
@@ -448,6 +479,7 @@ class Runner:
 
         pending = pending_groups(self.groups, self.existing)
         resumed = len(self.rows) - sum(len(rows) for rows in pending.values())
+        self.completed_units = len(self.groups) - len(pending)
         logger.info(
             "Total questions: %d across %d segments (resumed %d, pending %d in %d segments)",
             len(self.rows), len(self.groups), resumed,
@@ -458,6 +490,7 @@ class Runner:
             return completion_counts(self.rows, self.existing)
 
         started = time.perf_counter()
+        log_section("INFERENCE")
         workers = max(1, args.workers)
         if workers > 1:
             with ThreadPoolExecutor(max_workers=workers) as executor:

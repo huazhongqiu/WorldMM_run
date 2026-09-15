@@ -5,6 +5,7 @@ Processes videos one-by-one, answering all queries per video.
 """
 
 import os
+import time
 import json
 import re
 import argparse
@@ -20,6 +21,13 @@ logging.basicConfig(level=logging.INFO)
 from worldmm.embedding import EmbeddingModel
 from worldmm.llm import LLMModel, PromptTemplateManager
 from worldmm.memory import WorldMemory, QAResult
+from worldmm.run_log import (
+    agent_round,
+    answer_status as log_answer_status,
+    emit,
+    progress,
+    section,
+)
 
 
 def load_json(file_path: str) -> Any:
@@ -157,6 +165,7 @@ def main() -> int:
     args = parser.parse_args()
 
     logger.info("Initializing models...")
+    emit(section("MODEL LOADING"))
     embedding_model = EmbeddingModel()
     retriever_llm = LLMModel(model_name=args.retriever_model)
     respond_llm = LLMModel(model_name=args.respond_model, fps=1)
@@ -190,18 +199,22 @@ def main() -> int:
 
     logger.info(f"Total queries: {len(eval_data)}, across {len(queries_by_video)} videos")
 
+    emit(section("INFERENCE"))
+
     results: List[Dict[str, Any]] = []
     latest = load_latest_results(args.records_jsonl) if args.records_jsonl else {}
     evaluate_true = 0
     model_name = args.retriever_model
 
     video_progress = tqdm(sorted(queries_by_video.items()), desc="Videos", unit="video")
-    for video_id, video_queries in video_progress:
+    video_total = len(queries_by_video)
+    for video_index, (video_id, video_queries) in enumerate(video_progress, start=1):
         if args.records_jsonl:
             video_queries = pending_rows(video_queries, latest)
             if not video_queries:
                 continue
         video_progress.set_postfix(vid=video_id, q=len(video_queries))
+        emit(progress("VIDEO", video_index, video_total, f"id={video_id} | questions={len(video_queries)}"))
 
         world_memory.reset()
         world_memory.episodic_memory.save_dir_root = get_episodic_cache_root( args.episodic_cache_dir, video_id)
@@ -277,11 +290,26 @@ def main() -> int:
             answer = row["answer"]
 
             qa_result: Optional[QAResult] = None
+            started_at = time.perf_counter()
+
+            def round_callback(event: str, details: Dict[str, Any]) -> None:
+                if event == "round":
+                    emit(agent_round(
+                        details["round_num"],
+                        args.max_rounds,
+                        details["decision"],
+                        memory_type=details.get("memory_type"),
+                        search_query=details.get("search_query"),
+                    ))
+                elif event == "answer_generation":
+                    emit(agent_round(details["round_num"], args.max_rounds, "answer"))
+
             try:
                 qa_result = world_memory.answer(
                     query=question,
                     choices=choices,
                     until_time=QUERY_TIME,
+                    progress_callback=round_callback,
                 )
                 response = qa_result.answer
                 status = answer_status(response)
@@ -291,9 +319,17 @@ def main() -> int:
                 logger.error(f"Error answering {row['ID']}: {e}")
                 response = "Error"
                 status = "error"
+            elapsed_seconds = time.perf_counter() - started_at
 
             correct = evaluate_prediction(response, answer, choices)
             evaluate_true += int(correct)
+            emit(log_answer_status(
+                status.upper(),
+                question_id=row["ID"],
+                answer=response,
+                correct=correct,
+                elapsed_seconds=elapsed_seconds,
+            ))
 
             result = {
                 "ID": row["ID"],
@@ -334,6 +370,7 @@ def main() -> int:
     with open(output_path, 'w') as f:
         json.dump(results, f, indent=4)
 
+    emit(section("EVALUATION"))
     final_accuracy = evaluate_true / len(results) if results else 0
     logger.info(f"\n{'='*50}")
     logger.info("Evaluation Complete")
