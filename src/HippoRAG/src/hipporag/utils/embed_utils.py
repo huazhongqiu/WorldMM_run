@@ -36,7 +36,7 @@ def retrieve_knn(query_ids: List[str], key_ids: List[str], query_vecs, key_vecs,
     for query_batch, query_batch_start_idx in tqdm(
             get_batches(vecs=query_vecs, batch_size=query_batch_size),
             total=(len(query_vecs) + query_batch_size - 1) // query_batch_size,  # Calculate total batches
-            desc="KNN for Queries"
+            desc="KNN for Queries", disable=True
     ):
         query_batch = query_batch.clone().detach()
         query_batch = query_batch.to(device)

@@ -33,6 +33,10 @@ def progress(label: str, current: int, total: int, extra: Optional[str] = None) 
     return f"{text} {extra}" if extra else text
 
 
+def question_separator(question_id: str) -> str:
+    return f"\n{'-' * 62}\nQUESTION id={question_id}"
+
+
 def agent_round(
     round_num: int,
     max_rounds: int,

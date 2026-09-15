@@ -34,6 +34,12 @@ def configure_console_logging() -> None:
     ):
         logging.getLogger(logger_name).setLevel(logging.ERROR)
 
+    try:
+        from transformers.utils import logging as transformers_logging
+    except ImportError:
+        pass
+    else:
+        transformers_logging.disable_progress_bar()
 
 configure_console_logging()
 
@@ -45,6 +51,7 @@ from worldmm.run_log import (
     answer_status as log_answer_status,
     emit,
     progress,
+    question_separator,
     section,
 )
 
@@ -225,7 +232,7 @@ def main() -> int:
     evaluate_true = 0
     model_name = args.retriever_model
 
-    video_progress = tqdm(sorted(queries_by_video.items()), desc="Videos", unit="video")
+    video_progress = tqdm(sorted(queries_by_video.items()), desc="Videos", unit="video", disable=True)
     video_total = len(queries_by_video)
     for video_index, (video_id, video_queries) in enumerate(video_progress, start=1):
         if args.records_jsonl:
@@ -310,6 +317,7 @@ def main() -> int:
             logger.info("%s index done in %.1fs", index_label, time.perf_counter() - index_started_at)
 
         for row in video_queries:
+            emit(question_separator(str(row["ID"])))
             choices = build_choices(row)
             question = row["question"]
             answer = row["answer"]
@@ -318,7 +326,7 @@ def main() -> int:
             started_at = time.perf_counter()
 
             def round_callback(event: str, details: Dict[str, Any]) -> None:
-                if event == "round":
+                if event == "round" and details["decision"] != "answer":
                     emit(agent_round(
                         details["round_num"],
                         args.max_rounds,
@@ -375,7 +383,7 @@ def main() -> int:
                 append_result(args.records_jsonl, result)
                 latest[str(row["ID"])] = result
 
-            logger.info(
+            logger.debug(
                 f"{row['ID']} Pred: {response}, Gold: {answer}, "
                 f"Correct: {correct} // Acc: {evaluate_true}/{len(results)} "
                 f"= {evaluate_true/len(results):.4f}"

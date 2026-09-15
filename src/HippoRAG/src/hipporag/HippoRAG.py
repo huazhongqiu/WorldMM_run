@@ -25,6 +25,16 @@ from .utils.config_utils import BaseConfig
 
 logger = logging.getLogger(__name__)
 
+
+
+def _average_phrase_weights(phrase_weights: np.ndarray, number_of_occurs: np.ndarray) -> np.ndarray:
+    return np.divide(
+        phrase_weights,
+        number_of_occurs,
+        out=np.zeros_like(phrase_weights),
+        where=number_of_occurs != 0,
+    )
+
 class HippoRAG:
 
     def __init__(self,
@@ -368,7 +378,7 @@ class HippoRAG:
 
         retrieval_results = []
 
-        for q_idx, query in tqdm(enumerate(queries), desc="Retrieving", total=len(queries)):
+        for q_idx, query in tqdm(enumerate(queries), desc="Retrieving", total=len(queries), disable=True):
             query_fact_scores = self.get_fact_scores(query)
             top_k_fact_indices, top_k_facts, rerank_log = self.rerank_facts(query, query_fact_scores)
 
@@ -424,7 +434,7 @@ class HippoRAG:
 
         logger.info(f"Adding OpenIE triples to graph.")
 
-        for chunk_key, triples in tqdm(zip(chunk_ids, chunk_triples)):
+        for chunk_key, triples in tqdm(zip(chunk_ids, chunk_triples), disable=True):
             entities_in_chunk = set()
 
             if chunk_key not in current_graph_nodes:
@@ -477,7 +487,7 @@ class HippoRAG:
 
         logger.info(f"Connecting passage nodes to phrase nodes.")
 
-        for idx, chunk_key in tqdm(enumerate(chunk_ids)):
+        for idx, chunk_key in tqdm(enumerate(chunk_ids), disable=True):
 
             if chunk_key not in current_graph_nodes:
                 for chunk_ent in chunk_triple_entities[idx]:
@@ -527,7 +537,7 @@ class HippoRAG:
         num_synonym_triple = 0
         synonym_candidates = []  # [(node key, [(synonym node key, corresponding score), ...]), ...]
 
-        for node_key in tqdm(query_node_key2knn_node_keys.keys(), total=len(query_node_key2knn_node_keys)):
+        for node_key in tqdm(query_node_key2knn_node_keys.keys(), total=len(query_node_key2knn_node_keys), disable=True):
             synonyms = []
 
             entity = self.entity_id_to_row[node_key]["content"]
@@ -688,7 +698,7 @@ class HippoRAG:
         self.add_new_edges()
 
         logger.info(f"Graph construction completed!")
-        print(self.get_graph_info())
+        logger.debug("Graph stats: %s", self.get_graph_info())
 
     def add_new_nodes(self):
         """
@@ -1129,7 +1139,7 @@ class HippoRAG:
 
                 phrases_and_ids.add((phrase, phrase_id))
 
-        phrase_weights /= number_of_occurs
+        phrase_weights = _average_phrase_weights(phrase_weights, number_of_occurs)
 
         for phrase, phrase_id in phrases_and_ids:
             if phrase not in phrase_scores:

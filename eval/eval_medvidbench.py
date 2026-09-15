@@ -44,6 +44,7 @@ from worldmm.run_log import (  # noqa: E402
     answer_status as log_answer_status,
     emit as log_line,
     progress as log_progress,
+    question_separator,
     section as log_section,
 )
 
@@ -69,6 +70,12 @@ def configure_logging() -> None:
         "worldmm.llm",
     ):
         logging.getLogger(name).setLevel(logging.ERROR)
+    try:
+        from transformers.utils import logging as transformers_logging
+    except ImportError:
+        pass
+    else:
+        transformers_logging.disable_progress_bar()
 
 
 def compact(value: Any, limit: int = 120) -> str:
@@ -339,12 +346,13 @@ class Runner:
         logger.info("%s index done in %.1fs", index_label, time.perf_counter() - index_started_at)
 
         for row in rows:
+            log_line(question_separator(str(row["ID"])))
             started = time.perf_counter()
             tokens_before = usage_total(state.retriever, state.respond)
             qa_result: Optional[QAResult] = None
 
             def round_callback(event: str, details: Dict[str, Any]) -> None:
-                if event == "round":
+                if event == "round" and details["decision"] != "answer":
                     log_line(log_agent_round(
                         details["round_num"],
                         args.max_rounds,
@@ -512,10 +520,10 @@ class Runner:
         if workers > 1:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = [executor.submit(self.process_group, vid, rows) for vid, rows in pending.items()]
-                for future in tqdm(as_completed(futures), total=len(futures), desc="Segments", unit="segment"):
+                for future in tqdm(as_completed(futures), total=len(futures), desc="Segments", unit="segment", disable=True):
                     future.result()
         else:
-            for video_id, rows in tqdm(pending.items(), desc="Segments", unit="segment"):
+            for video_id, rows in tqdm(pending.items(), desc="Segments", unit="segment", disable=True):
                 self.process_group(video_id, rows)
 
         for memory in self.worker_memories:
