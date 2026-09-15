@@ -58,6 +58,19 @@ def test_seed_precomputed_openie_marks_coarse_captions_as_already_extracted(tmp_
     assert all(row["extracted_triples"] == [] for row in payload["docs"])
 
 
+def test_seed_precomputed_openie_deduplicates_identical_passages(tmp_path: Path) -> None:
+    source = tmp_path / "offline.json"
+    source.write_text(json.dumps({"ner_results": {}, "triple_results": {}}), encoding="utf-8")
+    memory = EpisodicMemory.__new__(EpisodicMemory)
+    memory.load_precomputed_openie(str(source))
+    target = tmp_path / "cache" / "openie.json"
+    hipporag = SimpleNamespace(openie_results_path=str(target))
+
+    memory._seed_precomputed_openie(hipporag, ["same caption", "same caption"], "30sec")
+
+    assert len(json.loads(target.read_text(encoding="utf-8"))["docs"]) == 1
+
+
 def test_evaluators_load_persisted_openie_before_indexing() -> None:
     lvbench = (ROOT / "eval" / "eval.py").read_text(encoding="utf-8")
     medvidbench = (ROOT / "eval" / "eval_medvidbench.py").read_text(encoding="utf-8")
