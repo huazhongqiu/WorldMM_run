@@ -70,6 +70,20 @@ def test_lmdeploy_reads_configured_token_cap(monkeypatch) -> None:
     model.generate("hello")
     assert client.requests[0]["max_tokens"] == 4096
 
+
+def test_lmdeploy_does_not_forward_local_fps_option() -> None:
+    client = FakeClient()
+    model = LMDEPLOY_MODULE.LMDeployModel(
+        model_name="Qwen3.5-4B",
+        base_url="http://127.0.0.1:23333/v1",
+        client=client,
+        fps=1,
+    )
+
+    model.generate("hello")
+
+    assert "fps" not in client.requests[0]
+
 MODULE = importlib.util.module_from_spec(SPEC)
 
 sys.modules[SPEC.name] = MODULE
