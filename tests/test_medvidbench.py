@@ -6,6 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Lock
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 UTILS_DIR = ROOT / "data" / "MedVidBench" / "utils"
 
@@ -267,6 +269,22 @@ def test_runner_empty_answer_is_not_success():
     assert module.answer_status("answer") == "success"
     assert module.answer_status("  \n") == "empty_response"
     assert module.answer_status("Unable to generate answer") == "generation_error"
+
+
+def test_runner_required_openie_missing_or_malformed_fails_closed(tmp_path):
+    module = _runner()
+
+    class FakeMemory:
+        def load_episodic_openie(self, path):
+            raise ValueError("malformed")
+
+    with pytest.raises(FileNotFoundError):
+        module.load_required_episodic_openie(FakeMemory(), str(tmp_path / "missing.json"))
+
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="malformed"):
+        module.load_required_episodic_openie(FakeMemory(), str(malformed))
 
 
 def test_synchronized_embedding_wrappers_share_one_lock():

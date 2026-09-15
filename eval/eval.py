@@ -130,6 +130,12 @@ def get_episodic_cache_root(cache_dir: str, video_id: str) -> str:
     return os.path.join(cache_dir, str(video_id), "episodic_memory")
 
 
+def load_required_episodic_openie(memory: WorldMemory, path: str) -> None:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Required persisted OpenIE file is missing: {path}")
+    memory.load_episodic_openie(path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Video-MME Evaluation with WorldMM")
     parser.add_argument("--eval-json", type=str, default="data/Video-MME/videomme/test.json", help="Path to Video-MME test JSON")
@@ -225,8 +231,17 @@ def main() -> int:
             args.metadata_dir, "episodic_memory", str(video_id),
             f"openie_results_{model_name}.json",
         )
-        if os.path.exists(episodic_openie_file):
-            world_memory.load_episodic_openie(episodic_openie_file)
+        try:
+            load_required_episodic_openie(world_memory, episodic_openie_file)
+        except Exception as e:
+            logger.error(f"Persisted OpenIE invalid for video {video_id}: {e}")
+            for row in video_queries:
+                result = _error_result(row, f"OpenIE error: {e}", status="episodic_openie_error")
+                results.append(result)
+                if args.records_jsonl:
+                    append_result(args.records_jsonl, result)
+                    latest[str(row["ID"])] = result
+            continue
 
         semantic_file = os.path.join(
             args.metadata_dir, "semantic_memory", str(video_id),

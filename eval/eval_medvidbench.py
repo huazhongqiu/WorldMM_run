@@ -140,6 +140,12 @@ def answer_status(response: Any) -> str:
     return "success"
 
 
+def load_required_episodic_openie(memory: WorldMemory, path: str) -> None:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Required persisted OpenIE file is missing: {path}")
+    memory.load_episodic_openie(path)
+
+
 class RecordWriter:
     def __init__(self, path: str) -> None:
         self.path = path
@@ -246,8 +252,13 @@ class Runner:
             args.metadata_dir, "episodic_memory", str(video_id),
             f"openie_results_{args.retriever_model}.json",
         )
-        if os.path.exists(episodic_openie_file):
-            memory.load_episodic_openie(episodic_openie_file)
+        try:
+            load_required_episodic_openie(memory, episodic_openie_file)
+        except Exception as exc:
+            logger.error("Persisted OpenIE invalid for segment %s: %s", video_id, exc)
+            for row in rows:
+                self.emit(row, None, "episodic_openie_error", f"OpenIE error: {exc}")
+            return
 
         semantic_file = os.path.join(
             args.metadata_dir, "semantic_memory", str(video_id),
@@ -273,21 +284,20 @@ class Runner:
             # fresh in-process retry succeeds once memory has settled.
             logger.warning("Indexing failed for segment %s (%s); retrying once", video_id, exc)
             time.sleep(10.0)
-            memory.reset()
-            memory.episodic_memory.save_dir_root = os.path.join(
-                args.episodic_cache_dir, str(video_id), "episodic_memory"
-            )
-            memory.load_episodic_captions(caption_files=caption_files)
-            if os.path.exists(episodic_openie_file):
-                memory.load_episodic_openie(episodic_openie_file)
-            if os.path.exists(semantic_file):
-                memory.load_semantic_triples(file_path=semantic_file)
-            if os.path.exists(visual_pkl) and "10sec" in caption_files:
-                memory.load_visual_clips(
-                    embeddings_path=visual_pkl,
-                    clips_data=load_json(caption_files["10sec"]),
-                )
             try:
+                memory.reset()
+                memory.episodic_memory.save_dir_root = os.path.join(
+                    args.episodic_cache_dir, str(video_id), "episodic_memory"
+                )
+                memory.load_episodic_captions(caption_files=caption_files)
+                load_required_episodic_openie(memory, episodic_openie_file)
+                if os.path.exists(semantic_file):
+                    memory.load_semantic_triples(file_path=semantic_file)
+                if os.path.exists(visual_pkl) and "10sec" in caption_files:
+                    memory.load_visual_clips(
+                        embeddings_path=visual_pkl,
+                        clips_data=load_json(caption_files["10sec"]),
+                    )
                 memory.index(until_time)
             except Exception as retry_exc:
                 logger.error("Indexing failed for segment %s: %s", video_id, retry_exc)

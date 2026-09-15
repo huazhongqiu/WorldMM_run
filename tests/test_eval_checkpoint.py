@@ -3,6 +3,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "eval" / "eval.py"
@@ -57,6 +59,23 @@ def test_generation_failure_sentinel_is_not_successful() -> None:
 
     assert not module.is_successful_result(result)
     assert module.answer_status(result["response"]) == "generation_error"
+
+
+def test_required_openie_missing_or_malformed_fails_closed(tmp_path: Path) -> None:
+    module = load_eval_module()
+
+    class FakeMemory:
+        def load_episodic_openie(self, path):
+            raise ValueError("malformed")
+
+    missing = tmp_path / "missing.json"
+    with pytest.raises(FileNotFoundError):
+        module.load_required_episodic_openie(FakeMemory(), str(missing))
+
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="malformed"):
+        module.load_required_episodic_openie(FakeMemory(), str(malformed))
 
 
 def test_merge_results_preserves_eval_order_and_marks_missing() -> None:
