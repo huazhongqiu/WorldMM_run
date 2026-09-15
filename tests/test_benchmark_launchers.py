@@ -68,3 +68,10 @@ def test_launchers_default_to_dual_gpu_split_and_durable_outputs() -> None:
     assert 'eval_cvd="${GPUS[0]},${GPUS[-1]}"' in lvbench
     assert 'eval_cvd="${GPUS[0]},${GPUS[-1]}"' in medvidbench
     assert 'WORLDMM_VIS_EMBEDDING_DEVICE="${eval_vis_device}"' in medvidbench
+
+
+def test_launchers_do_not_emit_ansi_color_escapes() -> None:
+    for benchmark in ("lvbench", "medvidbench"):
+        content = script(benchmark)
+        assert "\\033[" not in content
+        assert "echo -e" not in content

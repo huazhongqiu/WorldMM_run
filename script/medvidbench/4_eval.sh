@@ -39,9 +39,8 @@ IFS=',' read -r -a GPUS <<< "${GPU_LIST}"
 CACHE_RATIO="${CACHE_RATIO:-0.8}"
 COLOCATED_CACHE_RATIO="${COLOCATED_CACHE_RATIO:-0.35}"
 COLOCATED_EVAL_RATIO="${COLOCATED_EVAL_RATIO:-0.30}"
-BLUE='\033[1;34m'; GREEN='\033[1;32m'; NC='\033[0m'
-log() { echo -e "${BLUE}[medvidbench-eval]${NC} $*"; }
-ok()  { echo -e "${GREEN}[medvidbench-eval]${NC} $*"; }
+log() { echo "[medvidbench-eval] $*"; }
+ok()  { echo "[medvidbench-eval] $*"; }
 section() {
     printf "\n============================================================\n %s\n============================================================\n" "$*"
 }

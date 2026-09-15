@@ -32,9 +32,8 @@ IFS=',' read -r -a GPUS <<< "${GPU_LIST}"
 # card, so start the server with a smaller KV cache to leave room for it.
 CACHE_RATIO="${CACHE_RATIO:-0.8}"
 COLOCATED_CACHE_RATIO="${COLOCATED_CACHE_RATIO:-0.35}"
-BLUE='\033[1;34m'; GREEN='\033[1;32m'; NC='\033[0m'
-log() { echo -e "${BLUE}[lvbench-eval]${NC} $*"; }
-ok()  { echo -e "${GREEN}[lvbench-eval]${NC} $*"; }
+log() { echo "[lvbench-eval] $*"; }
+ok()  { echo "[lvbench-eval] $*"; }
 section() {
     printf "\n============================================================\n %s\n============================================================\n" "$*"
 }
