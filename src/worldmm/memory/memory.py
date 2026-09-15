@@ -117,6 +117,10 @@ class WorldMemory:
             self.episodic_memory.load_captions_from_files(caption_files)
         if caption_data:
             self.episodic_memory.load_captions_from_data(caption_data)
+
+    def load_episodic_openie(self, file_path: str) -> None:
+        """Load persisted offline OpenIE results for episodic indexing."""
+        self.episodic_memory.load_precomputed_openie(file_path)
     
     def load_semantic_triples(
         self,

@@ -4,6 +4,7 @@ Episodic Memory module for WorldMM.
 
 import json
 import logging
+import os
 from typing import Callable, Dict, List, Any, Optional, Tuple, Union
 from dataclasses import dataclass
 
@@ -11,6 +12,7 @@ from ...llm import LLMModel, PromptTemplateManager
 from ...embedding import EmbeddingModel
 
 from hipporag import HippoRAG
+from .utils import compute_mdhash_id
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +118,41 @@ class EpisodicMemory:
         # Track indexed entries (entries that have been indexed up to indexed_time)
         self.indexed_entries: Dict[str, List[CaptionEntry]] = {g: [] for g in self.granularities}
         self.indexed_time: int = 0  # 0 means nothing indexed yet
+        self.precomputed_openie: Optional[Dict[str, Dict[str, Any]]] = None
+
+    def load_precomputed_openie(self, file_path: str) -> None:
+        """Load offline 10-second NER/triples for HippoRAG cache seeding."""
+        data = _load_json(file_path)
+        ner_results = data.get("ner_results") if isinstance(data, dict) else None
+        triple_results = data.get("triple_results") if isinstance(data, dict) else None
+        if not isinstance(ner_results, dict) or not isinstance(triple_results, dict):
+            raise ValueError(f"Invalid precomputed OpenIE file: {file_path}")
+        self.precomputed_openie = {
+            "ner_results": ner_results,
+            "triple_results": triple_results,
+        }
+
+    def _seed_precomputed_openie(self, hipporag: HippoRAG, passages: List[str], granularity: str) -> None:
+        """Mark every passage extracted so HippoRAG never calls online OpenIE."""
+        if self.precomputed_openie is None:
+            return
+        ner_results = self.precomputed_openie["ner_results"]
+        triple_results = self.precomputed_openie["triple_results"]
+        docs = []
+        for passage in passages:
+            chunk_id = compute_mdhash_id(passage, prefix="chunk-")
+            docs.append(
+                {
+                    "idx": chunk_id,
+                    "passage": passage,
+                    "extracted_entities": ner_results.get(chunk_id, []) if granularity == "10sec" else [],
+                    "extracted_triples": triple_results.get(chunk_id, []) if granularity == "10sec" else [],
+                }
+            )
+        target = hipporag.openie_results_path
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as handle:
+            json.dump({"docs": docs}, handle, ensure_ascii=False)
     
     def _get_or_create_hipporag(self, granularity: str) -> HippoRAG:
         """Get or create HippoRAG instance for a granularity level."""
@@ -247,6 +284,7 @@ class EpisodicMemory:
             
             # Get or create HippoRAG instance and update index
             hipporag = self._get_or_create_hipporag(granularity)
+            self._seed_precomputed_openie(hipporag, caption_texts, granularity)
             if progress_callback is not None:
                 progress_callback("episodic_index_start", granularity=granularity, total=len(caption_texts))
             set_progress_callback = getattr(hipporag.openie, "set_progress_callback", None)
