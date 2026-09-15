@@ -79,8 +79,17 @@ def append_result(path: str, result: Dict[str, Any]) -> None:
         handle.write(json.dumps(result, ensure_ascii=False) + "\n")
 
 
+def answer_status(response: Any) -> str:
+    normalized = str(response or "").strip()
+    if not normalized:
+        return "empty_response"
+    if normalized == "Unable to generate answer":
+        return "generation_error"
+    return "success"
+
+
 def is_successful_result(result: Dict[str, Any]) -> bool:
-    return result.get("status") == "success" and bool(str(result.get("response", "")).strip())
+    return result.get("status") == "success" and answer_status(result.get("response")) == "success"
 
 
 def pending_rows(rows: List[Dict[str, Any]], latest: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -260,9 +269,9 @@ def main() -> int:
                     until_time=QUERY_TIME,
                 )
                 response = qa_result.answer
-                if not str(response).strip():
-                    raise ValueError("empty model response")
-                status = "success"
+                status = answer_status(response)
+                if status != "success":
+                    raise ValueError(status.replace("_", " "))
             except Exception as e:
                 logger.error(f"Error answering {row['ID']}: {e}")
                 response = "Error"

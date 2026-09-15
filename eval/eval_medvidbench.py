@@ -25,9 +25,9 @@ import sys
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from threading import Lock, local
 from typing import Any, Dict, List, Optional
-from pathlib import Path
 
 from tqdm import tqdm
 
@@ -112,6 +112,34 @@ def completion_counts(rows: List[Dict[str, Any]], latest: Dict[str, Dict[str, An
     return counts
 
 
+def is_successful_record(record: Optional[Dict[str, Any]]) -> bool:
+    return bool(
+        record
+        and record.get("status") == "success"
+        and str(record.get("prediction", "")).strip()
+    )
+
+
+def pending_groups(
+    groups: Dict[str, List[Dict[str, Any]]],
+    latest: Dict[str, Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    return {
+        video_id: pending_rows
+        for video_id, rows in groups.items()
+        if (pending_rows := [row for row in rows if not is_successful_record(latest.get(row["ID"]))])
+    }
+
+
+def answer_status(response: Any) -> str:
+    normalized = str(response or "").strip()
+    if not normalized:
+        return "empty_response"
+    if normalized == "Unable to generate answer":
+        return "generation_error"
+    return "success"
+
+
 class RecordWriter:
     def __init__(self, path: str) -> None:
         self.path = path
@@ -148,6 +176,7 @@ class Runner:
         self.completed_count = 0
         self.embedding_model: Optional[EmbeddingModel] = None
         self.embedding_init_lock = Lock()
+        self.embedding_call_lock = Lock()
         self.worker_local = local()
         self.worker_memories: List[WorldMemory] = []
         self.worker_lock = Lock()
@@ -167,7 +196,7 @@ class Runner:
         if hasattr(self.worker_local, "memory"):
             return self.worker_local
         args = self.args
-        embedding = SynchronizedEmbedding(self.ensure_embedding_model())
+        embedding = SynchronizedEmbedding(self.ensure_embedding_model(), self.embedding_call_lock)
         retriever = LLMModel(model_name=args.retriever_model)
         respond = LLMModel(model_name=args.respond_model)
         memory = WorldMemory(
@@ -277,7 +306,7 @@ class Runner:
                     until_time=until_time,
                 )
                 response = qa_result.answer
-                status = "success"
+                status = answer_status(response)
             except Exception as exc:
                 logger.error("Error answering %s: %s", row["ID"], exc)
                 response = ""
@@ -335,7 +364,7 @@ class Runner:
     # ---- outputs --------------------------------------------------------------
     def write_outputs(self, run_seconds: float) -> None:
         args = self.args
-        records = {key: rec for key, rec in self.existing.items() if rec.get("status") == "success"}
+        records = {key: rec for key, rec in self.existing.items() if is_successful_record(rec)}
         results = []
         for row in self.rows:
             rec = records.get(row["ID"])
@@ -407,11 +436,7 @@ class Runner:
         os.makedirs(args.output_dir, exist_ok=True)
         os.makedirs(args.episodic_cache_dir, exist_ok=True)
 
-        pending = {
-            video_id: rows
-            for video_id, rows in self.groups.items()
-            if any(self.existing.get(row["ID"], {}).get("status") != "success" for row in rows)
-        }
+        pending = pending_groups(self.groups, self.existing)
         resumed = len(self.rows) - sum(len(rows) for rows in pending.values())
         logger.info(
             "Total questions: %d across %d segments (resumed %d, pending %d in %d segments)",
@@ -445,9 +470,9 @@ class Runner:
 class SynchronizedEmbedding:
     """Serialize GPU embedding calls while workers issue LLM requests concurrently."""
 
-    def __init__(self, model: EmbeddingModel) -> None:
+    def __init__(self, model: EmbeddingModel, lock: Lock) -> None:
         self._model = model
-        self._lock = Lock()
+        self._lock = lock
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._model, name)

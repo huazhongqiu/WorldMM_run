@@ -47,6 +47,18 @@ def test_pending_rows_retries_errors_and_skips_only_successes() -> None:
     assert module.pending_rows(rows, latest) == [{"ID": "2"}, {"ID": "3"}]
 
 
+def test_generation_failure_sentinel_is_not_successful() -> None:
+    module = load_eval_module()
+    result = {
+        "ID": "1",
+        "status": "success",
+        "response": "Unable to generate answer",
+    }
+
+    assert not module.is_successful_result(result)
+    assert module.answer_status(result["response"]) == "generation_error"
+
+
 def test_merge_results_preserves_eval_order_and_marks_missing() -> None:
     module = load_eval_module()
     rows = [

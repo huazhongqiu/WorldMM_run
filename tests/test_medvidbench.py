@@ -244,6 +244,58 @@ def test_runner_completion_counts_distinguish_success_error_and_missing():
     }
 
 
+def test_runner_pending_groups_retry_only_failed_missing_and_empty():
+    module = _runner()
+    groups = {
+        "segment-a": [{"ID": "1"}, {"ID": "2"}, {"ID": "3"}],
+        "segment-b": [{"ID": "4"}],
+    }
+    latest = {
+        "1": {"status": "success", "prediction": "answer"},
+        "2": {"status": "success", "prediction": ""},
+        "4": {"status": "success", "prediction": "done"},
+    }
+
+    assert module.pending_groups(groups, latest) == {
+        "segment-a": [{"ID": "2"}, {"ID": "3"}],
+    }
+
+
+def test_runner_empty_answer_is_not_success():
+    module = _runner()
+    assert module.answer_status("answer") == "success"
+    assert module.answer_status("  \n") == "empty_response"
+    assert module.answer_status("Unable to generate answer") == "generation_error"
+
+
+def test_synchronized_embedding_wrappers_share_one_lock():
+    module = _runner()
+
+    class FakeEmbedding:
+        def __init__(self):
+            self.active = 0
+            self.max_active = 0
+
+        def encode(self, value):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            time.sleep(0.03)
+            self.active -= 1
+            return value
+
+    model = FakeEmbedding()
+    shared_lock = Lock()
+    wrappers = [
+        module.SynchronizedEmbedding(model, shared_lock),
+        module.SynchronizedEmbedding(model, shared_lock),
+    ]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda item: item[0].encode(item[1]), zip(wrappers, [1, 2])))
+
+    assert results == [1, 2]
+    assert model.max_active == 1
+
+
 def test_runner_default_source_path_is_relative_to_checkout():
     source = (ROOT / "eval" / "eval_medvidbench.py").read_text(encoding="utf-8")
     assert '"/myworkspace/projects/WorldMM/src"' not in source

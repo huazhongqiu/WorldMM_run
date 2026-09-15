@@ -57,7 +57,7 @@ CUDA_VISIBLE_DEVICES=<gpu> lmdeploy serve api_server /myworkspace/models/Qwen/Qw
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `GPU_LIST` | `0,1` | 使用的 GPU；`auto` 自动探测全部卡。每卡一个 LMDeploy 实例；**单卡（如 1×4090）填 `GPU_LIST=0` 即可** |
+| `GPU_LIST` | `0,1` | 使用的 GPU；`auto` 自动探测全部卡。正式推理建议至少双卡；`GPU_LIST=0` 仅作为可能 OOM 的兼容入口 |
 | `CACHE_RATIO` | `0.8` | LLM 独占卡时的 KV cache 比例（videospy 同款） |
 | `COLOCATED_CACHE_RATIO` | `0.35` | 单卡模式下 semantic/eval 阶段 LLM 服务与 embedding 模型共享显存时的 KV cache 比例（自动以小缓存重启服务） |
 | `SAMPLE_FPS` | `1.0` | caption 抽帧率；`0.5` 可显著提速（约省一半时间） |
@@ -119,7 +119,7 @@ SMOKE=1 bash script/lvbench/run_all.sh
 
 ## 注意事项
 
-- 支持**单卡**（如 1×4090）：`GPU_LIST=0 bash script/lvbench/run_all.sh`。semantic / eval 阶段会把 LMDeploy 的 KV cache 自动降到 `COLOCATED_CACHE_RATIO`（默认 0.35）并重启服务，给 Qwen3-Embedding-4B 腾显存；caption/multiscale/episodic 阶段仍用满 `CACHE_RATIO`。多卡行为与之前完全一致。
+- 保留**单卡**兼容入口 `GPU_LIST=0`，但长视频索引会让 LMDeploy 与 Qwen3-Embedding-4B 同卡争抢显存；实测 1×4090 即使把 KV cache 降到 0.30 仍可能 OOM。正式推理使用 `GPU_LIST=0,1`，让 GPU 0 跑 LMDeploy、GPU 1 跑 embedding/visual retrieval。
 - 日志里不再出现 `INFO:httpx:HTTP Request ...` 刷屏（已在 `worldmm/llm/lmdeploy.py` 统一静音）；每个大阶段开始、每个分片日志开头都有 `====` 分界线。
 - 若端口 23333 已有可用实例，脚本会直接复用且**不会**替你关掉它；此时请确保最后一卡未被该实例占用（单卡模式下 semantic/eval 阶段该实例最好带 `--cache-max-entry-count 0.35`）。
 - 复用 23333 前会核对 `/v1/models` 的 model id；若不是 `Qwen3.5-4B`，脚本会直接失败，避免把结果混入错误模型的 checkpoint。

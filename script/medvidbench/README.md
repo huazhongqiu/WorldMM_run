@@ -56,7 +56,7 @@ RC（region caption）题在合成 mp4 时按 `RC_info.start_frame_bbox` 画绿�
 
 ## 关键环境变量
 
-`GPU_LIST`（默认 0）、`MODEL`（默认 Qwen3.5-4B）、`SAMPLE_FPS`（1.0）、
+`GPU_LIST`（默认 0,1；GPU 0 部署 LMDeploy，GPU 1 运行 embedding/visual retrieval）、`MODEL`（默认 Qwen3.5-4B）、`SAMPLE_FPS`（1.0）、
 `MAX_FRAME_EDGE`（1280）、`NUM_FRAMES`（16，VLM2Vec 每片段帧数）、`SYNTH_WORKERS`（8）、
 `WITH_EVAL`（预处理后是否接评测）、`EVAL_WORKERS`（评测并发段数）、`SKIP_LLM_JUDGE`、
 `SMOKE`、`WORLDMM_MEDVIDBENCH_ROOT/SCRATCH/OUTPUT`。
