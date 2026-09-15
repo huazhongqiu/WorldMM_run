@@ -22,13 +22,23 @@ SMOKE=1 bash /myworkspace/projects/WorldMM/script/medvidbench/launch.sh
 bash /myworkspace/projects/WorldMM/script/medvidbench/launch.sh
 
 # 预处理完成后，推理 + 官方评测 + 报告：
-GPU_LIST=0 EVAL_WORKERS=4 bash /myworkspace/projects/WorldMM/script/medvidbench/4_eval.sh
+cd /myworkspace/projects/WorldMM && GPU_LIST=0,1 EVAL_WORKERS=4 EVAL_ATTEMPTS=2 WORLDMM_MEDVIDBENCH_MAX_ROUNDS=5 bash script/medvidbench/4_eval.sh
 # 只算确定性指标（不跑 LLM judge）：
 SKIP_LLM_JUDGE=1 bash .../4_eval.sh
 ```
 
 进度：`bash script/medvidbench/check_progress.sh`，日志在
 `/workspace/worldmm/medvidbench/logs/`。
+
+正式推理命令在启动 LMDeploy 前只读校验 1,124 题引用的全部持久化记忆，不依赖已清理的
+`/workspace` 合成 mp4。每题结果立即写入
+`/myworkspace/projects/output/worldmm/medvidbench/records.jsonl`；重启后只处理失败或缺失题。
+默认最多两轮，仍有空预测/错误时以非零状态退出，只有 1,124 条非空预测齐全后才运行官方评测和报告。
+
+双卡分工：GPU 0 运行与 VideoSpy 完全相同的 Qwen3.5-4B LMDeploy（PyTorch、TP=1、
+batch=8、KV cache=0.8、`reasoning-parser=default`、`tool-call-parser=qwen3coder`）；GPU 1
+加载文本和视觉 embedding。`EVAL_WORKERS=4` 并发处理不同 segment，但共享 embedding 只初始化一次，
+GPU embedding 调用串行化，LLM 请求仍可并发进入 batch。端口 23333 已有服务时会先核对 model id。
 
 ## 阶段与产物
 

@@ -17,6 +17,8 @@ MODEL="${MODEL:-Qwen3.5-4B}"
 MODEL_PATH="${MODEL_PATH:-/myworkspace/models/Qwen/${MODEL}}"
 BASE_PORT="${BASE_PORT:-23333}"
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-900}"
+MAX_ROUNDS="${WORLDMM_LVBENCH_MAX_ROUNDS:-5}"
+EVAL_ATTEMPTS="${EVAL_ATTEMPTS:-2}"
 
 WORLDMM_NEEDED="${WORLDMM_NEEDED:-/myworkspace/projects/worldmm_needed}"
 LVBENCH_ROOT="${WORLDMM_LVBENCH_ROOT:-${WORLDMM_NEEDED}/lvbench}"
@@ -52,15 +54,32 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-is_ready() { curl -fs "http://127.0.0.1:${BASE_PORT}/v1/models" >/dev/null 2>&1; }
+endpoint_responding() { curl -fs "http://127.0.0.1:${BASE_PORT}/v1/models" >/dev/null 2>&1; }
+served_model_matches() {
+    curl -fs "http://127.0.0.1:${BASE_PORT}/v1/models" 2>/dev/null | \
+        "${WORLDMM_PYTHON}" -c 'import json,sys; target=sys.argv[1]; data=json.load(sys.stdin); raise SystemExit(0 if any(row.get("id") == target for row in data.get("data", [])) else 1)' "${MODEL}"
+}
+is_ready() { endpoint_responding && served_model_matches; }
 
 mkdir -p "${OUTPUT_DIR}/cache" "${OUTPUT_DIR}/logs"
+[[ -x "${WORLDMM_PYTHON}" ]] || { echo "ERROR: WorldMM Python is not executable: ${WORLDMM_PYTHON}" >&2; exit 2; }
+[[ -x "${LMDEPLOY_BIN}" ]] || { echo "ERROR: LMDeploy is not executable: ${LMDEPLOY_BIN}" >&2; exit 2; }
+[[ -d "${MODEL_PATH}" ]] || { echo "ERROR: model directory is missing: ${MODEL_PATH}" >&2; exit 2; }
+"${WORLDMM_PYTHON}" "${PROJECT_ROOT}/eval/validate_precomputed.py" \
+    --eval-json "${LVBENCH_ROOT}/qa/lvbench_test.json" \
+    --root "${LVBENCH_ROOT}" \
+    --model "${MODEL}"
 banner "LVBench eval — gpus=${GPUS[*]}, model=${MODEL}"
 if (( ${#GPUS[@]} == 1 )); then
     log "Single-GPU layout: LLM server + text embedding share GPU ${GPUS[0]} (cache ratio ${COLOCATED_CACHE_RATIO})"
 fi
-if is_ready; then
-    ok "Existing LMDeploy instance found on port ${BASE_PORT} (reusing)"
+if endpoint_responding; then
+    if served_model_matches; then
+        ok "Existing LMDeploy instance found on port ${BASE_PORT} (reusing)"
+    else
+        echo "ERROR: port ${BASE_PORT} already responds but does not serve ${MODEL}" >&2
+        exit 2
+    fi
 else
     local_ratio="${CACHE_RATIO}"
     (( ${#GPUS[@]} == 1 )) && local_ratio="${COLOCATED_CACHE_RATIO}"
@@ -97,45 +116,53 @@ export WORLDMM_LMDEPLOY_BASE_URL="${WORLDMM_LMDEPLOY_BASE_URL:-http://127.0.0.1:
 export WORLDMM_LMDEPLOY_MODEL="${MODEL}"
 export WORLDMM_LMDEPLOY_MAX_TOKENS="${WORLDMM_LMDEPLOY_MAX_TOKENS:-4096}"
 export WORLDMM_LMDEPLOY_API_KEY="${WORLDMM_LMDEPLOY_API_KEY:-EMPTY}"
+export WORLDMM_LMDEPLOY_ENABLE_THINKING="${WORLDMM_LMDEPLOY_ENABLE_THINKING:-false}"
 export WORLDMM_TEXT_EMBEDDING_MODEL="${WORLDMM_TEXT_EMBEDDING_MODEL:-/myworkspace/mymodels/Qwen3-Embedding-4B}"
 export WORLDMM_VISUAL_EMBEDDING_MODEL="${WORLDMM_VISUAL_EMBEDDING_MODEL:-/myworkspace/mymodels/VLM2Vec}"
 export WORLDMM_VLM_BACKBONE_MODEL="${WORLDMM_VLM_BACKBONE_MODEL:-/myworkspace/mymodels/Qwen2-VL-2B-Instruct}"
 export WORLDMM_TEXT_ATTENTION="${WORLDMM_TEXT_ATTENTION:-flash_attention_2}"
 export WORLDMM_VLM_ATTENTION="${WORLDMM_VLM_ATTENTION:-flash_attention_2}"
-if (( ${#GPUS[@]} == 1 )); then
-    export WORLDMM_EMBEDDING_DEVICE=cuda:0
-else
-    export WORLDMM_EMBEDDING_DEVICE=cuda:1
-fi
 export PYTHONUNBUFFERED=1
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 
 log "Running eval: qa=${LVBENCH_ROOT}/qa/lvbench_test.json, caption=${LVBENCH_ROOT}/caption, metadata=${LVBENCH_ROOT}"
+eval_cvd="${GPUS[0]},${GPUS[-1]}"
+eval_emb_device="cuda:1"
 if (( ${#GPUS[@]} == 1 )); then
-    CUDA_VISIBLE_DEVICES="${GPUS[0]}" WORLDMM_LVBENCH_USAGE_FILE="${OUTPUT_DIR}/token_usage.json" \
-        "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/data/LVBench/utils/run_eval.py" \
-        --eval-json "${LVBENCH_ROOT}/qa/lvbench_test.json" \
-        --caption-dir "${LVBENCH_ROOT}/caption" \
-        --metadata-dir "${LVBENCH_ROOT}" \
-        --retriever-model "${MODEL}" \
-        --respond-model "${MODEL}" \
-        --episodic-cache-dir "${OUTPUT_DIR}/cache" \
-        --output-dir "${OUTPUT_DIR}" \
-        --eval-name lvbench \
-        2>&1 | tee "${OUTPUT_DIR}/logs/eval_$(date +%Y%m%d_%H%M%S).log"
-else
-    CUDA_VISIBLE_DEVICES="${GPUS[0]},${GPUS[-1]}" WORLDMM_LVBENCH_USAGE_FILE="${OUTPUT_DIR}/token_usage.json" \
-        "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/data/LVBench/utils/run_eval.py" \
-        --eval-json "${LVBENCH_ROOT}/qa/lvbench_test.json" \
-        --caption-dir "${LVBENCH_ROOT}/caption" \
-        --metadata-dir "${LVBENCH_ROOT}" \
-        --retriever-model "${MODEL}" \
-        --respond-model "${MODEL}" \
-        --episodic-cache-dir "${OUTPUT_DIR}/cache" \
-        --output-dir "${OUTPUT_DIR}" \
-        --eval-name lvbench \
-        2>&1 | tee "${OUTPUT_DIR}/logs/eval_$(date +%Y%m%d_%H%M%S).log"
+    eval_cvd="${GPUS[0]}"
+    eval_emb_device="cuda:0"
 fi
+
+run_inference() {
+    local attempt="$1"
+    CUDA_VISIBLE_DEVICES="${eval_cvd}" WORLDMM_EMBEDDING_DEVICE="${eval_emb_device}" \
+        WORLDMM_LVBENCH_USAGE_FILE="${OUTPUT_DIR}/token_usage.json" \
+        "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/data/LVBench/utils/run_eval.py" \
+        --eval-json "${LVBENCH_ROOT}/qa/lvbench_test.json" \
+        --caption-dir "${LVBENCH_ROOT}/caption" \
+        --metadata-dir "${LVBENCH_ROOT}" \
+        --retriever-model "${MODEL}" \
+        --respond-model "${MODEL}" \
+        --episodic-cache-dir "${OUTPUT_DIR}/cache" \
+        --output-dir "${OUTPUT_DIR}" \
+        --eval-name lvbench \
+        --max-rounds "${MAX_ROUNDS}" \
+        --records-jsonl "${OUTPUT_DIR}/records.jsonl" \
+        --require-complete \
+        2>&1 | tee "${OUTPUT_DIR}/logs/eval_attempt${attempt}_$(date +%Y%m%d_%H%M%S).log"
+}
+
+inference_complete=0
+for ((attempt=1; attempt<=EVAL_ATTEMPTS; attempt++)); do
+    if run_inference "${attempt}"; then
+        inference_complete=1
+        break
+    fi
+    if (( attempt < EVAL_ATTEMPTS )); then
+        log "Inference attempt ${attempt}/${EVAL_ATTEMPTS} incomplete; retrying only failed/missing questions"
+    fi
+done
+(( inference_complete == 1 )) || { echo "ERROR: LVBench inference remains incomplete after ${EVAL_ATTEMPTS} attempts" >&2; exit 1; }
 
 model_dir="${MODEL//-/_}"
 "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/data/LVBench/utils/make_videospy_report.py" \

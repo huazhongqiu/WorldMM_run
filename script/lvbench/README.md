@@ -90,8 +90,17 @@ CUDA_VISIBLE_DEVICES=<gpu> lmdeploy serve api_server /myworkspace/models/Qwen/Qw
 ## 单独跑 eval（预处理完成后）
 
 ```bash
-bash /myworkspace/projects/WorldMM/script/lvbench/4_eval.sh
+cd /myworkspace/projects/WorldMM && GPU_LIST=0,1 EVAL_ATTEMPTS=2 WORLDMM_LVBENCH_MAX_ROUNDS=5 bash script/lvbench/4_eval.sh
 ```
+
+这是双卡正式推理的无人值守前台命令。启动前会只读检查 315 题引用的 20 个视频是否都具备
+四档 caption、episodic、semantic 和 visual memory；不会重建离线产物。推理期间每题立即追加到
+`/myworkspace/projects/output/worldmm/lvbench/records.jsonl`，作业重启时跳过成功题、只重试失败或缺失题。
+默认最多执行两轮；两轮后仍不完整则以非零状态退出，不生成误导性的“完成”报告。
+
+双卡分工：GPU 0 独占 Qwen3.5-4B LMDeploy，GPU 1 加载 Qwen3-Embedding-4B 与 VLM2Vec
+检索模型。LMDeploy 参数逐项对齐 VideoSpy：PyTorch、TP=1、batch=8、KV cache=0.8、
+`reasoning-parser=default`、`tool-call-parser=qwen3coder`，且不设置 session length。
 
 原始结果输出到 `/myworkspace/projects/output/worldmm/lvbench/Qwen3.5_4B_Qwen3.5_4B/lvbench_eval.json`，同时自动生成 **videospy 风格报告**（`/myworkspace/projects/output/worldmm/lvbench/report/`）：
 
@@ -113,5 +122,6 @@ SMOKE=1 bash script/lvbench/run_all.sh
 - 支持**单卡**（如 1×4090）：`GPU_LIST=0 bash script/lvbench/run_all.sh`。semantic / eval 阶段会把 LMDeploy 的 KV cache 自动降到 `COLOCATED_CACHE_RATIO`（默认 0.35）并重启服务，给 Qwen3-Embedding-4B 腾显存；caption/multiscale/episodic 阶段仍用满 `CACHE_RATIO`。多卡行为与之前完全一致。
 - 日志里不再出现 `INFO:httpx:HTTP Request ...` 刷屏（已在 `worldmm/llm/lmdeploy.py` 统一静音）；每个大阶段开始、每个分片日志开头都有 `====` 分界线。
 - 若端口 23333 已有可用实例，脚本会直接复用且**不会**替你关掉它；此时请确保最后一卡未被该实例占用（单卡模式下 semantic/eval 阶段该实例最好带 `--cache-max-entry-count 0.35`）。
+- 复用 23333 前会核对 `/v1/models` 的 model id；若不是 `Qwen3.5-4B`，脚本会直接失败，避免把结果混入错误模型的 checkpoint。
 - caption 段级失败会自动重试 3 次；整视频失败会在下一轮 pass 重试（共 `CAPTION_ATTEMPTS` 轮），重跑命令只补缺失视频。
 - 参考耗时（2×4090）：源代码对齐档（原生分辨率帧）约 14–20h，提速档 `SAMPLE_FPS=0.5 NUM_FRAMES=10` 或 `MAX_FRAME_EDGE=1280` 约 7–10h；更多卡近似线性下降，单卡（1×4090）约再翻倍。

@@ -15,7 +15,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-GPU_LIST="${GPU_LIST:-0}"
+GPU_LIST="${GPU_LIST:-0,1}"
 MODEL="${MODEL:-Qwen3.5-4B}"
 MODEL_PATH="${MODEL_PATH:-/myworkspace/models/Qwen/${MODEL}}"
 BASE_PORT="${BASE_PORT:-23333}"
@@ -23,6 +23,8 @@ STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-900}"
 EVAL_WORKERS="${EVAL_WORKERS:-4}"
 SKIP_LLM_JUDGE="${SKIP_LLM_JUDGE:-0}"
 EVAL_NAME="${EVAL_NAME:-medvidbench}"
+MAX_ROUNDS="${WORLDMM_MEDVIDBENCH_MAX_ROUNDS:-5}"
+EVAL_ATTEMPTS="${EVAL_ATTEMPTS:-2}"
 
 WORLDMM_NEEDED="${WORLDMM_NEEDED:-/myworkspace/projects/worldmm_needed}"
 MEDVIDBENCH_ROOT="${WORLDMM_MEDVIDBENCH_ROOT:-${WORLDMM_NEEDED}/medvidbench}"
@@ -59,15 +61,34 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-is_ready() { curl -fs "http://127.0.0.1:${BASE_PORT}/v1/models" >/dev/null 2>&1; }
+endpoint_responding() { curl -fs "http://127.0.0.1:${BASE_PORT}/v1/models" >/dev/null 2>&1; }
+served_model_matches() {
+    curl -fs "http://127.0.0.1:${BASE_PORT}/v1/models" 2>/dev/null | \
+        "${WORLDMM_PYTHON}" -c 'import json,sys; target=sys.argv[1]; data=json.load(sys.stdin); raise SystemExit(0 if any(row.get("id") == target for row in data.get("data", [])) else 1)' "${MODEL}"
+}
+is_ready() { endpoint_responding && served_model_matches; }
 
 mkdir -p "${OUTPUT_DIR}/cache" "${OUTPUT_DIR}/logs"
+[[ -x "${WORLDMM_PYTHON}" ]] || { echo "ERROR: WorldMM Python is not executable: ${WORLDMM_PYTHON}" >&2; exit 2; }
+[[ -x "${LMDEPLOY_BIN}" ]] || { echo "ERROR: LMDeploy is not executable: ${LMDEPLOY_BIN}" >&2; exit 2; }
+[[ -d "${MODEL_PATH}" ]] || { echo "ERROR: model directory is missing: ${MODEL_PATH}" >&2; exit 2; }
+[[ -f "${TRAINVAL_JSON}" ]] || { echo "ERROR: ground-truth JSON is missing: ${TRAINVAL_JSON}" >&2; exit 2; }
+[[ -d "${LEADERBOARD_DIR}" ]] || { echo "ERROR: leaderboard evaluator is missing: ${LEADERBOARD_DIR}" >&2; exit 2; }
+"${WORLDMM_PYTHON}" "${PROJECT_ROOT}/eval/validate_precomputed.py" \
+    --eval-json "${MEDVIDBENCH_ROOT}/qa/medvidbench_test.json" \
+    --root "${MEDVIDBENCH_ROOT}" \
+    --model "${MODEL}"
 banner "MedVidBench eval — gpus=${GPUS[*]}, model=${MODEL}"
 if (( ${#GPUS[@]} == 1 )); then
     log "Single-GPU layout: LLM server + text embedding share GPU ${GPUS[0]} (cache ratio ${COLOCATED_CACHE_RATIO})"
 fi
-if is_ready; then
-    ok "Existing LMDeploy instance found on port ${BASE_PORT} (reusing)"
+if endpoint_responding; then
+    if served_model_matches; then
+        ok "Existing LMDeploy instance found on port ${BASE_PORT} (reusing)"
+    else
+        echo "ERROR: port ${BASE_PORT} already responds but does not serve ${MODEL}" >&2
+        exit 2
+    fi
 else
     local_ratio="${CACHE_RATIO}"
     (( ${#GPUS[@]} == 1 )) && local_ratio="${COLOCATED_EVAL_RATIO}"
@@ -104,16 +125,12 @@ export WORLDMM_LMDEPLOY_BASE_URL="${WORLDMM_LMDEPLOY_BASE_URL:-http://127.0.0.1:
 export WORLDMM_LMDEPLOY_MODEL="${MODEL}"
 export WORLDMM_LMDEPLOY_MAX_TOKENS="${WORLDMM_LMDEPLOY_MAX_TOKENS:-4096}"
 export WORLDMM_LMDEPLOY_API_KEY="${WORLDMM_LMDEPLOY_API_KEY:-EMPTY}"
+export WORLDMM_LMDEPLOY_ENABLE_THINKING="${WORLDMM_LMDEPLOY_ENABLE_THINKING:-false}"
 export WORLDMM_TEXT_EMBEDDING_MODEL="${WORLDMM_TEXT_EMBEDDING_MODEL:-/myworkspace/mymodels/Qwen3-Embedding-4B}"
 export WORLDMM_VISUAL_EMBEDDING_MODEL="${WORLDMM_VISUAL_EMBEDDING_MODEL:-/myworkspace/mymodels/VLM2Vec}"
 export WORLDMM_VLM_BACKBONE_MODEL="${WORLDMM_VLM_BACKBONE_MODEL:-/myworkspace/mymodels/Qwen2-VL-2B-Instruct}"
 export WORLDMM_TEXT_ATTENTION="${WORLDMM_TEXT_ATTENTION:-flash_attention_2}"
 export WORLDMM_VLM_ATTENTION="${WORLDMM_VLM_ATTENTION:-flash_attention_2}"
-if (( ${#GPUS[@]} == 1 )); then
-    export WORLDMM_EMBEDDING_DEVICE=cuda:0
-else
-    export WORLDMM_EMBEDDING_DEVICE=cuda:1
-fi
 export PYTHONUNBUFFERED=1
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 
@@ -128,19 +145,36 @@ if (( ${#GPUS[@]} == 1 )); then
 fi
 # With a single GPU the vision encoder (VLM2Vec) runs on CPU so the LLM
 # server, the text embedding model and the vision encoder all fit together.
-CUDA_VISIBLE_DEVICES="${eval_cvd}" WORLDMM_EMBEDDING_DEVICE="${eval_emb_device}" WORLDMM_VIS_EMBEDDING_DEVICE="${eval_vis_device}" \
-    "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/eval/eval_medvidbench.py" \
-    --eval-json "${MEDVIDBENCH_ROOT}/qa/medvidbench_test.json" \
-    --ground-truth-json "${TRAINVAL_JSON}" \
-    --caption-dir "${MEDVIDBENCH_ROOT}/caption" \
-    --metadata-dir "${MEDVIDBENCH_ROOT}" \
-    --retriever-model "${MODEL}" \
-    --respond-model "${MODEL}" \
-    --episodic-cache-dir "${OUTPUT_DIR}/cache" \
-    --output-dir "${OUTPUT_DIR}" \
-    --eval-name "${EVAL_NAME}" \
-    --workers "${EVAL_WORKERS}" \
-    2>&1 | tee "${OUTPUT_DIR}/logs/eval_$(date +%Y%m%d_%H%M%S).log"
+run_inference() {
+    local attempt="$1"
+    CUDA_VISIBLE_DEVICES="${eval_cvd}" WORLDMM_EMBEDDING_DEVICE="${eval_emb_device}" WORLDMM_VIS_EMBEDDING_DEVICE="${eval_vis_device}" \
+        "${WORLDMM_PYTHON}" "${PROJECT_ROOT}/eval/eval_medvidbench.py" \
+        --eval-json "${MEDVIDBENCH_ROOT}/qa/medvidbench_test.json" \
+        --ground-truth-json "${TRAINVAL_JSON}" \
+        --caption-dir "${MEDVIDBENCH_ROOT}/caption" \
+        --metadata-dir "${MEDVIDBENCH_ROOT}" \
+        --retriever-model "${MODEL}" \
+        --respond-model "${MODEL}" \
+        --episodic-cache-dir "${OUTPUT_DIR}/cache" \
+        --output-dir "${OUTPUT_DIR}" \
+        --eval-name "${EVAL_NAME}" \
+        --workers "${EVAL_WORKERS}" \
+        --max-rounds "${MAX_ROUNDS}" \
+        --require-complete \
+        2>&1 | tee "${OUTPUT_DIR}/logs/eval_attempt${attempt}_$(date +%Y%m%d_%H%M%S).log"
+}
+
+inference_complete=0
+for ((attempt=1; attempt<=EVAL_ATTEMPTS; attempt++)); do
+    if run_inference "${attempt}"; then
+        inference_complete=1
+        break
+    fi
+    if (( attempt < EVAL_ATTEMPTS )); then
+        log "Inference attempt ${attempt}/${EVAL_ATTEMPTS} incomplete; retrying only failed/missing questions from records.jsonl"
+    fi
+done
+(( inference_complete == 1 )) || { echo "ERROR: MedVidBench inference remains incomplete after ${EVAL_ATTEMPTS} attempts" >&2; exit 1; }
 
 judge_args=()
 [[ "${SKIP_LLM_JUDGE}" == "1" ]] && judge_args+=(--skip-llm-judge)
