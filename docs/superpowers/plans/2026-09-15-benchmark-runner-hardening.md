@@ -86,6 +86,25 @@
 - [ ] **Step 4: Document exact dual-GPU commands**, checkpoint semantics, output paths, failure behavior, and the GPU split.
 - [ ] **Step 5: Verify GREEN** with launcher tests, `bash -n` for both scripts, and `git diff --check`.
 
+### Task 4A: Reuse persisted episodic OpenIE during inference
+
+**Files:**
+- Modify: `src/worldmm/memory/memory.py`
+- Modify: `src/worldmm/memory/episodic/memory.py`
+- Modify: `eval/eval.py`
+- Modify: `eval/eval_medvidbench.py`
+- Create: `tests/test_episodic_precomputed.py`
+
+**Interfaces:**
+- Consumes: `openie_results_Qwen3.5-4B.json` produced during offline preprocessing.
+- Produces: `WorldMemory.load_episodic_openie(file_path)` and deterministic HippoRAG OpenIE cache seeding before `update()`.
+
+- [ ] **Step 1: Write failing tests** proving 10-second captions receive their persisted NER/triples by content hash and coarser captions receive explicit empty OpenIE entries, so HippoRAG has no missing chunks that could trigger an LLM extraction call.
+- [ ] **Step 2: Verify RED** with `/opt/conda/envs/worldmm/bin/python -m pytest tests/test_episodic_precomputed.py -q`.
+- [ ] **Step 3: Implement cache seeding** only when an evaluator explicitly loads a persisted OpenIE file. Write generated HippoRAG caches under the existing output/cache root, never back into `worldmm_needed`.
+- [ ] **Step 4: Wire both evaluators** to the per-video/per-segment offline OpenIE file and fail that unit if it is absent or malformed.
+- [ ] **Step 5: Verify GREEN** and confirm a bounded index smoke issues zero NER/triple LLM calls.
+
 ### Task 5: Remote validation, timing evidence, and synchronization
 
 **Files:**
