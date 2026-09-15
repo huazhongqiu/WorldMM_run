@@ -35,18 +35,6 @@ def _bucket(phase: str) -> dict[str, int]:
     return USAGE_BY_PHASE.setdefault(phase, {k: 0 for k in TOKEN_USAGE})
 
 
-def patch_lmdeploy_provider() -> None:
-    from worldmm.llm import lmdeploy
-
-    original_init = lmdeploy.LMDeployModel.__init__
-
-    def patched_init(self, model_name, *, base_url=None, api_key=None, client=None, **request_options):
-        request_options.pop("fps", None)
-        original_init(self, model_name, base_url=base_url, api_key=api_key, client=client, **request_options)
-
-    lmdeploy.LMDeployModel.__init__ = patched_init
-
-
 def patch_phase_tracking() -> None:
     from worldmm.memory import WorldMemory
 
@@ -87,13 +75,12 @@ def patch_usage_collection() -> None:
 
 def main() -> int:
     sys.path.insert(0, str(PROJECT_ROOT / "eval"))
-    patch_lmdeploy_provider()
     patch_phase_tracking()
     patch_usage_collection()
     import eval as lvbench_eval  # eval/eval.py is a script, not a package module
 
     sys.argv[0] = "eval.py"
-    lvbench_eval.main()
+    exit_code = lvbench_eval.main()
 
     usage_path = os.environ.get("WORLDMM_LVBENCH_USAGE_FILE")
     if usage_path:
@@ -104,7 +91,7 @@ def main() -> int:
         payload["indexing"] = USAGE_BY_PHASE.get("indexing", zero)
         Path(usage_path).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         print(f"Token usage written to {usage_path}: {json.dumps(payload)}")
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

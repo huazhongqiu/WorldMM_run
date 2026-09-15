@@ -37,6 +37,9 @@ class LMDeployModel:
         client: Any | None = None,
         **request_options: Any,
     ) -> None:
+        # Local video backends accept fps as a model-construction hint.  It is
+        # not an OpenAI chat-completions parameter and LMDeploy rejects it.
+        request_options.pop("fps", None)
         self.model_name = os.environ.get("WORLDMM_LMDEPLOY_MODEL", model_name)
         self.base_url = base_url or os.environ.get("WORLDMM_LMDEPLOY_BASE_URL")
         if not self.base_url:

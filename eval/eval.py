@@ -12,6 +12,7 @@ from collections import defaultdict
 from typing import Dict, List, Any, Optional
 from tqdm import tqdm
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -56,6 +57,47 @@ VIDEOMME_GRANULARITIES = ["10sec", "30sec", "3min", "10min"]
 QUERY_TIME = int("1" + "23595999")  # DAY1 end-of-video: index everything
 
 
+def load_latest_results(path: str) -> Dict[str, Dict[str, Any]]:
+    """Load the last valid JSONL record for each question ID."""
+    latest: Dict[str, Dict[str, Any]] = {}
+    if not path or not os.path.exists(path):
+        return latest
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+                latest[str(record["ID"])] = record
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue
+    return latest
+
+
+def append_result(path: str, result: Dict[str, Any]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(result, ensure_ascii=False) + "\n")
+
+
+def pending_rows(rows: List[Dict[str, Any]], latest: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [row for row in rows if latest.get(str(row["ID"]), {}).get("status") != "success"]
+
+
+def merge_results(rows: List[Dict[str, Any]], latest: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    for row in rows:
+        merged.append(latest.get(str(row["ID"])) or _error_result(row, "Missing result", status="missing"))
+    return merged
+
+
+def completion_counts(results: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts = {"success": 0, "error": 0, "missing": 0, "total": len(results)}
+    for result in results:
+        status = result.get("status", "missing")
+        counts[status if status in counts else "error"] += 1
+    return counts
+
+
 def build_choices(row: Dict[str, Any]) -> Dict[str, str]:
     """Build choices dict from a row."""
     choices = {}
@@ -70,7 +112,7 @@ def get_episodic_cache_root(cache_dir: str, video_id: str) -> str:
     return os.path.join(cache_dir, str(video_id), "episodic_memory")
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="Video-MME Evaluation with WorldMM")
     parser.add_argument("--eval-json", type=str, default="data/Video-MME/videomme/test.json", help="Path to Video-MME test JSON")
     parser.add_argument("--caption-dir", type=str, default="data/Video-MME/caption", help="Root caption directory with {videoID}/ subdirs")
@@ -86,6 +128,8 @@ def main():
     parser.add_argument("--duration", type=str, default=None, choices=["short", "medium", "long"], help="Optionally filter by video duration")
     parser.add_argument("--episodic-cache-dir", type=str, default=".cache/videomme", help="Root cache directory for per-video episodic HippoRAG state.")
     parser.add_argument("--eval-name", type=str, default="videomme", help="Dataset name used in the output filename.")
+    parser.add_argument("--records-jsonl", type=str, default=None, help="Append-only per-question checkpoint file.")
+    parser.add_argument("--require-complete", action="store_true", help="Exit non-zero if any question is error/missing.")
     args = parser.parse_args()
 
     logger.info("Initializing models...")
@@ -123,11 +167,16 @@ def main():
     logger.info(f"Total queries: {len(eval_data)}, across {len(queries_by_video)} videos")
 
     results: List[Dict[str, Any]] = []
+    latest = load_latest_results(args.records_jsonl) if args.records_jsonl else {}
     evaluate_true = 0
     model_name = args.retriever_model
 
     video_progress = tqdm(sorted(queries_by_video.items()), desc="Videos", unit="video")
     for video_id, video_queries in video_progress:
+        if args.records_jsonl:
+            video_queries = pending_rows(video_queries, latest)
+            if not video_queries:
+                continue
         video_progress.set_postfix(vid=video_id, q=len(video_queries))
 
         world_memory.reset()
@@ -145,7 +194,11 @@ def main():
         if not caption_files:
             logger.error(f"No caption files for video {video_id}, skipping")
             for row in video_queries:
-                results.append(_error_result(row, "No caption files"))
+                result = _error_result(row, "No caption files")
+                results.append(result)
+                if args.records_jsonl:
+                    append_result(args.records_jsonl, result)
+                    latest[str(row["ID"])] = result
             continue
 
         world_memory.load_episodic_captions(caption_files=caption_files)
@@ -171,7 +224,11 @@ def main():
         except Exception as e:
             logger.error(f"Indexing failed for video {video_id}: {e}")
             for row in video_queries:
-                results.append(_error_result(row, f"Index error: {e}"))
+                result = _error_result(row, f"Index error: {e}")
+                results.append(result)
+                if args.records_jsonl:
+                    append_result(args.records_jsonl, result)
+                    latest[str(row["ID"])] = result
             continue
 
         for row in video_queries:
@@ -187,15 +244,18 @@ def main():
                     until_time=QUERY_TIME,
                 )
                 response = qa_result.answer
+                status = "success"
             except Exception as e:
                 logger.error(f"Error answering {row['ID']}: {e}")
                 response = "Error"
+                status = "error"
 
             correct = evaluate_prediction(response, answer, choices)
             evaluate_true += int(correct)
 
-            results.append({
+            result = {
                 "ID": row["ID"],
+                "status": status,
                 "video_id": video_id,
                 "type": row.get("type", ""),
                 "duration": row.get("duration", ""),
@@ -206,13 +266,21 @@ def main():
                 "round_history": qa_result.round_history if qa_result else [],
                 "num_rounds": qa_result.num_rounds if qa_result else 0,
                 "evaluate": correct,
-            })
+            }
+            results.append(result)
+            if args.records_jsonl:
+                append_result(args.records_jsonl, result)
+                latest[str(row["ID"])] = result
 
             logger.info(
                 f"{row['ID']} Pred: {response}, Gold: {answer}, "
                 f"Correct: {correct} // Acc: {evaluate_true}/{len(results)} "
                 f"= {evaluate_true/len(results):.4f}"
             )
+
+    if args.records_jsonl:
+        results = merge_results(eval_data, latest)
+        evaluate_true = sum(int(bool(row.get("evaluate"))) for row in results)
 
     duration_tag = f"_{args.duration}" if args.duration else ""
     output_path = os.path.join(
@@ -237,11 +305,20 @@ def main():
     logger.info(f"{'='*50}")
 
     world_memory.cleanup()
+    counts = completion_counts(results)
+    logger.info(
+        "Completion: success=%d error=%d missing=%d total=%d",
+        counts["success"], counts["error"], counts["missing"], counts["total"],
+    )
+    if args.require_complete and counts["success"] != counts["total"]:
+        return 2
+    return 0
 
 
-def _error_result(row: Dict[str, Any], msg: str) -> Dict[str, Any]:
+def _error_result(row: Dict[str, Any], msg: str, status: str = "error") -> Dict[str, Any]:
     return {
         "ID": row["ID"],
+        "status": status,
         "video_id": row.get("video_id", ""),
         "type": row.get("type", ""),
         "duration": row.get("duration", ""),
@@ -268,4 +345,4 @@ def _print_per_duration_accuracy(results: List[Dict[str, Any]]):
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
