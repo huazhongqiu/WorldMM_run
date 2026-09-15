@@ -17,12 +17,12 @@ class Qwen3EmbeddingModel:
             processor_kwargs={"padding_side": "left"},
         )
     
-    def encode_text(self, texts: Union[str, List[str]], batch_size: int = 256) -> np.ndarray:
+    def encode_text(self, texts: Union[str, List[str]], batch_size: int = 64) -> np.ndarray:
         """Encode text into embeddings"""
         if isinstance(texts, str):
             texts = [texts]
         
-        embeddings = self.model.encode(texts, batch_size=batch_size)
+        embeddings = self.model.encode(texts, batch_size=batch_size, show_progress_bar=False)
         return embeddings
     
     def encode(self, content: Union[str, List[str]], **kwargs) -> np.ndarray:

@@ -5,6 +5,8 @@ Processes videos one-by-one, answering all queries per video.
 """
 
 import os
+
+os.environ.setdefault("TQDM_DISABLE", "1")
 import time
 import json
 import re
@@ -16,7 +18,24 @@ import logging
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+
+
+def configure_console_logging() -> None:
+    """Keep the benchmark stream focused on runner-level progress and failures."""
+    logging.basicConfig(level=logging.WARNING)
+    logging.getLogger().setLevel(logging.WARNING)
+    logger.setLevel(logging.INFO)
+    for logger_name in (
+        "hipporag",
+        "sentence_transformers",
+        "transformers",
+        "worldmm.memory",
+        "worldmm.embedding",
+    ):
+        logging.getLogger(logger_name).setLevel(logging.ERROR)
+
+
+configure_console_logging()
 
 from worldmm.embedding import EmbeddingModel
 from worldmm.llm import LLMModel, PromptTemplateManager
@@ -272,9 +291,13 @@ def main() -> int:
             clips_data = load_json(base_caption_file)
             world_memory.load_visual_clips(embeddings_path=visual_pkl, clips_data=clips_data)
 
+        index_started_at = time.perf_counter()
+        index_label = f"[VIDEO {video_index:03d}]"
+        logger.info("%s building memory index...", index_label)
         try:
             world_memory.index(QUERY_TIME)
         except Exception as e:
+            logger.error("%s index=FAILED after %.1fs: %s", index_label, time.perf_counter() - index_started_at, e)
             logger.error(f"Indexing failed for video {video_id}: {e}")
             for row in video_queries:
                 result = _error_result(row, f"Index error: {e}")
@@ -283,6 +306,8 @@ def main() -> int:
                     append_result(args.records_jsonl, result)
                     latest[str(row["ID"])] = result
             continue
+        else:
+            logger.info("%s index done in %.1fs", index_label, time.perf_counter() - index_started_at)
 
         for row in video_queries:
             choices = build_choices(row)

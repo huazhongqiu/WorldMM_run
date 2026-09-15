@@ -15,6 +15,30 @@ from hipporag import HippoRAG
 from .utils import compute_mdhash_id
 
 logger = logging.getLogger(__name__)
+DEFAULT_EMBEDDING_BATCH_SIZE = 64
+
+
+def _embedding_batch_size() -> int:
+    raw_value = os.environ.get(
+        "WORLDMM_EPISODIC_EMBEDDING_BATCH_SIZE",
+        str(DEFAULT_EMBEDDING_BATCH_SIZE),
+    )
+    try:
+        batch_size = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            "WORLDMM_EPISODIC_EMBEDDING_BATCH_SIZE must be a positive integer"
+        ) from exc
+    if batch_size < 1:
+        raise ValueError("WORLDMM_EPISODIC_EMBEDDING_BATCH_SIZE must be a positive integer")
+    return batch_size
+
+
+def _clear_cuda_cache() -> None:
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 @dataclass
@@ -155,10 +179,13 @@ class EpisodicMemory:
     def _get_or_create_hipporag(self, granularity: str) -> HippoRAG:
         """Get or create HippoRAG instance for a granularity level."""
         if granularity not in self.hipporag:
-            self.hipporag[granularity] = HippoRAG(
+            hipporag = HippoRAG(
                 save_dir=f"{self.save_dir_root}/{granularity}",
                 llm_model=self.llm_model,
-                embedding_model=self.embedding_model)
+                embedding_model=self.embedding_model,
+            )
+            hipporag.global_config.embedding_batch_size = _embedding_batch_size()
+            self.hipporag[granularity] = hipporag
         return self.hipporag[granularity]
     
     def load_captions_from_files(
@@ -299,7 +326,10 @@ class EpisodicMemory:
                             total=total,
                         )
                     )
-            hipporag.update(docs=caption_texts)
+            try:
+                hipporag.update(docs=caption_texts)
+            finally:
+                _clear_cuda_cache()
             if progress_callback is not None:
                 progress_callback("episodic_index_complete", granularity=granularity, total=len(caption_texts))
             

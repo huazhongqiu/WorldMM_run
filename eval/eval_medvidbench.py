@@ -21,6 +21,8 @@ import argparse
 import json
 import logging
 import os
+os.environ.setdefault("TQDM_DISABLE", "1")
+
 import sys
 import time
 from collections import defaultdict
@@ -52,11 +54,21 @@ DAY_PREFIX = "1"  # "DAY1" -> the leading digit of eval.py's QUERY_TIME conventi
 
 
 def configure_logging() -> None:
-    logging.basicConfig(level=logging.INFO)
-    for name in ("httpx", "httpcore", "openai", "hipporag", "sentence_transformers",
-                 "worldmm.memory", "worldmm.llm"):
-        logging.getLogger(name).setLevel(logging.WARNING)
-    logging.getLogger("worldmm.memory").setLevel(logging.ERROR)
+    logging.basicConfig(level=logging.WARNING)
+    logging.getLogger().setLevel(logging.WARNING)
+    logger.setLevel(logging.INFO)
+    for name in (
+        "httpx",
+        "httpcore",
+        "openai",
+        "hipporag",
+        "sentence_transformers",
+        "transformers",
+        "worldmm.memory",
+        "worldmm.embedding",
+        "worldmm.llm",
+    ):
+        logging.getLogger(name).setLevel(logging.ERROR)
 
 
 def compact(value: Any, limit: int = 120) -> str:
@@ -292,13 +304,16 @@ class Runner:
                 clips_data=load_json(caption_files["10sec"]),
             )
 
+        index_started_at = time.perf_counter()
+        index_label = f"[VIDEO {unit_current:03d}]"
+        logger.info("%s building memory index...", index_label)
         try:
             memory.index(until_time)
         except Exception as exc:
             # A transient failure here is usually a model load racing another
             # process for GPU memory (meta-tensor/OOM during lazy init); the
             # fresh in-process retry succeeds once memory has settled.
-            logger.warning("Indexing failed for segment %s (%s); retrying once", video_id, exc)
+            logger.warning("%s index attempt 1 failed (%s); retrying once", index_label, exc)
             time.sleep(10.0)
             try:
                 memory.reset()
@@ -316,10 +331,12 @@ class Runner:
                     )
                 memory.index(until_time)
             except Exception as retry_exc:
+                logger.error("%s index=FAILED after %.1fs: %s", index_label, time.perf_counter() - index_started_at, retry_exc)
                 logger.error("Indexing failed for segment %s: %s", video_id, retry_exc)
                 for row in rows:
                     self.emit(row, None, "index_error", f"Index error: {retry_exc}")
                 return
+        logger.info("%s index done in %.1fs", index_label, time.perf_counter() - index_started_at)
 
         for row in rows:
             started = time.perf_counter()
