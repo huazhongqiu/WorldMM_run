@@ -97,6 +97,19 @@ def latest_records(path: str) -> Dict[str, Dict[str, Any]]:
     return latest
 
 
+def completion_counts(rows: List[Dict[str, Any]], latest: Dict[str, Dict[str, Any]]) -> Dict[str, int]:
+    counts = {"success": 0, "error": 0, "missing": 0, "total": len(rows)}
+    for row in rows:
+        record = latest.get(str(row["ID"]))
+        if record is None:
+            counts["missing"] += 1
+        elif record.get("status") == "success" and str(record.get("prediction", "")).strip():
+            counts["success"] += 1
+        else:
+            counts["error"] += 1
+    return counts
+
+
 class RecordWriter:
     def __init__(self, path: str) -> None:
         self.path = path
@@ -132,6 +145,7 @@ class Runner:
         self.print_lock = Lock()
         self.completed_count = 0
         self.embedding_model: Optional[EmbeddingModel] = None
+        self.embedding_init_lock = Lock()
         self.worker_local = local()
         self.worker_memories: List[WorldMemory] = []
         self.worker_lock = Lock()
@@ -139,9 +153,12 @@ class Runner:
     # ---- worker-local models -------------------------------------------------
     def ensure_embedding_model(self) -> EmbeddingModel:
         if self.embedding_model is None:
-            logger.info("Initializing embedding model ...")
-            self.embedding_model = EmbeddingModel()
-            self.embedding_model.load_model("text")
+            with self.embedding_init_lock:
+                if self.embedding_model is None:
+                    logger.info("Initializing embedding model ...")
+                    embedding_model = EmbeddingModel()
+                    embedding_model.load_model("text")
+                    self.embedding_model = embedding_model
         return self.embedding_model
 
     def current_worker(self) -> local:
@@ -374,7 +391,7 @@ class Runner:
         logger.info("Run manifest: %s", manifest_path)
 
     # ---- main -----------------------------------------------------------------
-    def run(self) -> None:
+    def run(self) -> Dict[str, int]:
         args = self.args
         os.makedirs(args.output_dir, exist_ok=True)
         os.makedirs(args.episodic_cache_dir, exist_ok=True)
@@ -392,7 +409,7 @@ class Runner:
         )
         if not pending:
             self.write_outputs(0.0)
-            return
+            return completion_counts(self.rows, self.existing)
 
         started = time.perf_counter()
         workers = max(1, args.workers)
@@ -411,6 +428,7 @@ class Runner:
             except Exception:
                 pass
         self.write_outputs(time.perf_counter() - started)
+        return completion_counts(self.rows, self.existing)
 
 
 class SynchronizedEmbedding:
@@ -460,12 +478,20 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--eval-name", default="medvidbench")
     parser.add_argument("--mode", default="test", choices=["test", "smoke"])
     parser.add_argument("--workers", type=int, default=1, help="Concurrent segment workers")
+    parser.add_argument("--require-complete", action="store_true", help="Exit non-zero unless every prediction is non-empty.")
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[List[str]] = None) -> None:
     configure_logging()
-    Runner(parse_args(argv)).run()
+    args = parse_args(argv)
+    counts = Runner(args).run()
+    logger.info(
+        "Completion: success=%d error=%d missing=%d total=%d",
+        counts["success"], counts["error"], counts["missing"], counts["total"],
+    )
+    if args.require_complete and counts["success"] != counts["total"]:
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
