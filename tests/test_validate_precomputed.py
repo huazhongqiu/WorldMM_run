@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 import subprocess
 import sys
@@ -31,10 +32,15 @@ def build_tree(tmp_path: Path, *, model: str = "Qwen3.5-4B") -> tuple[Path, Path
         caption = root / "caption" / video_id
         caption.mkdir(parents=True)
         for granularity in ("10sec", "30sec", "3min", "10min"):
-            (caption / f"{granularity}.json").write_text("[]", encoding="utf-8")
+            rows = [{"text": f"{video_id} caption"}] if granularity == "10sec" else []
+            (caption / f"{granularity}.json").write_text(json.dumps(rows), encoding="utf-8")
         episodic = root / "episodic_memory" / video_id
         episodic.mkdir(parents=True)
-        (episodic / f"openie_results_{model}.json").write_text("[]", encoding="utf-8")
+        chunk_id = "chunk-" + hashlib.md5(f"{video_id} caption".encode()).hexdigest()
+        (episodic / f"openie_results_{model}.json").write_text(
+            json.dumps({"ner_results": {chunk_id: []}, "triple_results": {chunk_id: []}}),
+            encoding="utf-8",
+        )
         (episodic / f"episodic_triple_results_{model}.json").write_text("[]", encoding="utf-8")
         semantic = root / "semantic_memory" / video_id
         semantic.mkdir(parents=True)
@@ -54,6 +60,7 @@ def test_validate_precomputed_accepts_complete_tree(tmp_path: Path) -> None:
     assert summary.question_count == 3
     assert summary.unit_count == 2
     assert summary.missing == ()
+    assert summary.invalid == ()
 
 
 def test_validate_precomputed_reports_missing_paths_in_stable_order(tmp_path: Path) -> None:
@@ -84,6 +91,19 @@ def test_validate_precomputed_rejects_duplicate_question_ids(tmp_path: Path) -> 
         raise AssertionError("expected duplicate-ID validation failure")
     except ValueError as exc:
         assert "duplicate question ID" in str(exc)
+
+
+def test_validate_precomputed_rejects_incomplete_openie_coverage(tmp_path: Path) -> None:
+    module = load_validator()
+    eval_json, root = build_tree(tmp_path)
+    openie = root / "episodic_memory" / "video-b" / "openie_results_Qwen3.5-4B.json"
+    openie.write_text(json.dumps({"ner_results": {}, "triple_results": {}}), encoding="utf-8")
+
+    summary = module.validate_precomputed(eval_json, root, "Qwen3.5-4B")
+
+    assert summary.invalid == (
+        "episodic_memory/video-b/openie_results_Qwen3.5-4B.json: 1/1 caption hashes missing",
+    )
 
 
 def test_cli_exits_nonzero_for_incomplete_tree(tmp_path: Path) -> None:
