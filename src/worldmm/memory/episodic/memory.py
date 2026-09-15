@@ -138,21 +138,19 @@ class EpisodicMemory:
             return
         ner_results = self.precomputed_openie["ner_results"]
         triple_results = self.precomputed_openie["triple_results"]
-        docs = []
+        docs_by_id: Dict[str, Dict[str, Any]] = {}
         for passage in passages:
             chunk_id = compute_mdhash_id(passage, prefix="chunk-")
-            docs.append(
-                {
-                    "idx": chunk_id,
-                    "passage": passage,
-                    "extracted_entities": ner_results.get(chunk_id, []) if granularity == "10sec" else [],
-                    "extracted_triples": triple_results.get(chunk_id, []) if granularity == "10sec" else [],
-                }
-            )
+            docs_by_id[chunk_id] = {
+                "idx": chunk_id,
+                "passage": passage,
+                "extracted_entities": ner_results.get(chunk_id, []) if granularity == "10sec" else [],
+                "extracted_triples": triple_results.get(chunk_id, []) if granularity == "10sec" else [],
+            }
         target = hipporag.openie_results_path
         os.makedirs(os.path.dirname(target), exist_ok=True)
         with open(target, "w", encoding="utf-8") as handle:
-            json.dump({"docs": docs}, handle, ensure_ascii=False)
+            json.dump({"docs": list(docs_by_id.values())}, handle, ensure_ascii=False)
     
     def _get_or_create_hipporag(self, granularity: str) -> HippoRAG:
         """Get or create HippoRAG instance for a granularity level."""

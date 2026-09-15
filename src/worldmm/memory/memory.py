@@ -641,6 +641,7 @@ Step 2 (only if search): Pick one memory type (episodic/semantic/visual) and for
         self.episodic_memory.captions = {g: [] for g in self.episodic_memory.granularities}
         self.episodic_memory.caption_id_to_entry.clear()
         self.episodic_memory.text_to_entry.clear()
+        self.episodic_memory.precomputed_openie = None
         self.semantic_memory.triple_id_to_entry.clear()
         self.semantic_memory.timestamp_to_triples.clear()
         self.semantic_memory.available_timestamps.clear()
