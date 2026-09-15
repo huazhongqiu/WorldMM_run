@@ -1,7 +1,10 @@
 import importlib.util
 import json
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Lock
 
 ROOT = Path(__file__).resolve().parents[1]
 UTILS_DIR = ROOT / "data" / "MedVidBench" / "utils"
@@ -26,6 +29,10 @@ def _prepare():
 
 def _evaluate():
     return _load_module("medvidbench_evaluate", UTILS_DIR / "evaluate_medvidbench.py")
+
+
+def _runner():
+    return _load_module("medvidbench_runner", ROOT / "eval" / "eval_medvidbench.py")
 
 
 # ---------------------------------------------------------------------------
@@ -190,3 +197,48 @@ def test_nap_exact_accuracy():
         {"conversations": [{"from": "gpt", "value": "ignored"}]},
     ]
     assert module.compute_nap_exact_accuracy(submission, gt) == 0.5
+
+
+def test_runner_initializes_shared_embedding_exactly_once(monkeypatch):
+    module = _runner()
+
+    class FakeEmbedding:
+        constructed = 0
+        loaded = 0
+
+        def __init__(self):
+            type(self).constructed += 1
+            time.sleep(0.05)
+
+        def load_model(self, modality):
+            assert modality == "text"
+            type(self).loaded += 1
+
+    monkeypatch.setattr(module, "EmbeddingModel", FakeEmbedding)
+    runner = module.Runner.__new__(module.Runner)
+    runner.embedding_model = None
+    runner.embedding_init_lock = Lock()
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        models = list(executor.map(lambda _: runner.ensure_embedding_model(), range(8)))
+
+    assert len({id(model) for model in models}) == 1
+    assert FakeEmbedding.constructed == 1
+    assert FakeEmbedding.loaded == 1
+
+
+def test_runner_completion_counts_distinguish_success_error_and_missing():
+    module = _runner()
+    rows = [{"ID": "1"}, {"ID": "2"}, {"ID": "3"}, {"ID": "4"}]
+    latest = {
+        "1": {"status": "success", "prediction": "answer"},
+        "2": {"status": "success", "prediction": ""},
+        "3": {"status": "error", "prediction": ""},
+    }
+
+    assert module.completion_counts(rows, latest) == {
+        "success": 1,
+        "error": 2,
+        "missing": 1,
+        "total": 4,
+    }
