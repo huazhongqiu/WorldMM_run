@@ -23,6 +23,7 @@ EVAL_ATTEMPTS="${EVAL_ATTEMPTS:-2}"
 WORLDMM_NEEDED="${WORLDMM_NEEDED:-/myworkspace/projects/worldmm_needed}"
 LVBENCH_ROOT="${WORLDMM_LVBENCH_ROOT:-${WORLDMM_NEEDED}/lvbench}"
 OUTPUT_DIR="${WORLDMM_LVBENCH_OUTPUT:-/myworkspace/projects/output/worldmm/lvbench}"
+EVAL_CACHE_DIR="${WORLDMM_LVBENCH_EVAL_CACHE:-/workspace/worldmm/lvbench/eval_cache}"
 
 WORLDMM_PYTHON="${WORLDMM_PYTHON:-/opt/conda/envs/worldmm/bin/python}"
 LMDEPLOY_BIN="${LMDEPLOY_BIN:-/opt/conda/envs/llm_deploy/bin/lmdeploy}"
@@ -63,7 +64,7 @@ served_model_matches() {
 }
 is_ready() { endpoint_responding && served_model_matches; }
 
-mkdir -p "${OUTPUT_DIR}/cache" "${OUTPUT_DIR}/logs"
+mkdir -p "${EVAL_CACHE_DIR}" "${OUTPUT_DIR}/logs"
 [[ -x "${WORLDMM_PYTHON}" ]] || { echo "ERROR: WorldMM Python is not executable: ${WORLDMM_PYTHON}" >&2; exit 2; }
 [[ -x "${LMDEPLOY_BIN}" ]] || { echo "ERROR: LMDeploy is not executable: ${LMDEPLOY_BIN}" >&2; exit 2; }
 [[ -d "${MODEL_PATH}" ]] || { echo "ERROR: model directory is missing: ${MODEL_PATH}" >&2; exit 2; }
@@ -148,7 +149,7 @@ run_inference() {
         --metadata-dir "${LVBENCH_ROOT}" \
         --retriever-model "${MODEL}" \
         --respond-model "${MODEL}" \
-        --episodic-cache-dir "${OUTPUT_DIR}/cache" \
+        --episodic-cache-dir "${EVAL_CACHE_DIR}" \
         --output-dir "${OUTPUT_DIR}" \
         --eval-name lvbench \
         --max-rounds "${MAX_ROUNDS}" \

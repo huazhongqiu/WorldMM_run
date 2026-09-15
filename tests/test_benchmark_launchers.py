@@ -75,3 +75,14 @@ def test_launchers_do_not_emit_ansi_color_escapes() -> None:
         content = script(benchmark)
         assert "\\033[" not in content
         assert "echo -e" not in content
+
+
+def test_eval_caches_stay_in_workspace_not_the_durable_output_directory() -> None:
+    expected = {
+        "lvbench": 'EVAL_CACHE_DIR="${WORLDMM_LVBENCH_EVAL_CACHE:-/workspace/worldmm/lvbench/eval_cache}"',
+        "medvidbench": 'EVAL_CACHE_DIR="${WORLDMM_MEDVIDBENCH_EVAL_CACHE:-/workspace/worldmm/medvidbench/eval_cache}"',
+    }
+    for benchmark, declaration in expected.items():
+        content = script(benchmark)
+        assert declaration in content
+        assert '--episodic-cache-dir "${EVAL_CACHE_DIR}"' in content

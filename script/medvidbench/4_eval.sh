@@ -29,6 +29,7 @@ EVAL_ATTEMPTS="${EVAL_ATTEMPTS:-2}"
 WORLDMM_NEEDED="${WORLDMM_NEEDED:-/myworkspace/projects/worldmm_needed}"
 MEDVIDBENCH_ROOT="${WORLDMM_MEDVIDBENCH_ROOT:-${WORLDMM_NEEDED}/medvidbench}"
 OUTPUT_DIR="${WORLDMM_MEDVIDBENCH_OUTPUT:-/myworkspace/projects/output/worldmm/medvidbench}"
+EVAL_CACHE_DIR="${WORLDMM_MEDVIDBENCH_EVAL_CACHE:-/workspace/worldmm/medvidbench/eval_cache}"
 TRAINVAL_JSON="${TRAINVAL_JSON:-/myworkspace/data/MedVidBench/MedVidU_ECCV2026_TrainVal/medvidu_eccv2026_trainval.json}"
 LEADERBOARD_DIR="${LEADERBOARD_DIR:-/myworkspace/data/MedVidBench/MedVidBench-Leaderboard}"
 
@@ -70,7 +71,7 @@ served_model_matches() {
 }
 is_ready() { endpoint_responding && served_model_matches; }
 
-mkdir -p "${OUTPUT_DIR}/cache" "${OUTPUT_DIR}/logs"
+mkdir -p "${EVAL_CACHE_DIR}" "${OUTPUT_DIR}/logs"
 [[ -x "${WORLDMM_PYTHON}" ]] || { echo "ERROR: WorldMM Python is not executable: ${WORLDMM_PYTHON}" >&2; exit 2; }
 [[ -x "${LMDEPLOY_BIN}" ]] || { echo "ERROR: LMDeploy is not executable: ${LMDEPLOY_BIN}" >&2; exit 2; }
 [[ -d "${MODEL_PATH}" ]] || { echo "ERROR: model directory is missing: ${MODEL_PATH}" >&2; exit 2; }
@@ -160,7 +161,7 @@ run_inference() {
         --metadata-dir "${MEDVIDBENCH_ROOT}" \
         --retriever-model "${MODEL}" \
         --respond-model "${MODEL}" \
-        --episodic-cache-dir "${OUTPUT_DIR}/cache" \
+        --episodic-cache-dir "${EVAL_CACHE_DIR}" \
         --output-dir "${OUTPUT_DIR}" \
         --eval-name "${EVAL_NAME}" \
         --workers "${EVAL_WORKERS}" \
