@@ -23,6 +23,31 @@ def load_eval_module():
         sys.path.remove(str(ROOT / "src"))
 
 
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ("B", "B"),
+        ("The evidence supports the drum kit.\n\nFinal answer: B.", "B"),
+        ("Reasoning text.\n\nD", "D"),
+        ("Based on the frames, this cannot be determined.", None),
+    ],
+)
+def test_extract_final_choice_letter_uses_explicit_or_terminal_choice(
+    response: str, expected: str | None
+) -> None:
+    module = load_eval_module()
+
+    assert module.extract_final_choice_letter(
+        response, {"A": "first", "B": "second", "C": "third", "D": "fourth"}
+    ) == expected
+
+
+def test_evaluate_prediction_uses_terminal_choice_in_reasoning_text() -> None:
+    module = load_eval_module()
+
+    assert module.evaluate_prediction("Reasoning text.\n\nA", "A", {"A": "first"})
+
+
 def test_load_latest_results_ignores_partial_tail_and_last_record_wins(tmp_path: Path) -> None:
     module = load_eval_module()
     path = tmp_path / "records.jsonl"

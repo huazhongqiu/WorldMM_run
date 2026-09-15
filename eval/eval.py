@@ -66,26 +66,49 @@ def normalize(text: str) -> str:
     return text.lower().strip().rstrip(".,)")
 
 
-def extract_choice_letter(text: str) -> Optional[str]:
-    match = re.match(r"\(?([A-Za-z])[\.\)]?\s*", text.strip())
-    return match.group(1).upper() if match else None
+def extract_final_choice_letter(text: str, choices: Dict[str, str]) -> Optional[str]:
+    """Return the last explicit or standalone valid answer choice in a reply."""
+    valid_choices = {str(label).upper() for label in choices}
+    if not valid_choices:
+        return None
+
+    response = str(text or "")
+    normalized_response = normalize(response)
+    for label, choice in choices.items():
+        normalized_label = str(label).upper()
+        if normalized_response in {
+            normalize(str(choice)),
+            normalize(f"{normalized_label}. {choice}"),
+            normalize(f"({normalized_label}) {choice}"),
+        }:
+            return normalized_label
+
+    candidates: List[tuple[int, str]] = []
+    marked_answer = re.compile(
+        r"\b(?:(?:final|correct)\s+)?answer(?:\s+is\s+|\s*[:\-]\s*)\(?([A-Za-z])\)?",
+        flags=re.IGNORECASE,
+    )
+    standalone_choice = re.compile(r"\s*\(?([A-Za-z])\)?(?:\.)?\s*")
+
+    for match in marked_answer.finditer(response):
+        choice = match.group(1).upper()
+        if choice in valid_choices:
+            candidates.append((match.start(), choice))
+
+    offset = 0
+    for line in response.splitlines(keepends=True):
+        match = standalone_choice.fullmatch(line)
+        if match:
+            choice = match.group(1).upper()
+            if choice in valid_choices:
+                candidates.append((offset + match.start(), choice))
+        offset += len(line)
+
+    return max(candidates)[1] if candidates else None
 
 
 def evaluate_prediction(prediction: str, gold_letter: str, choices: Dict[str, str]) -> bool:
-    pred_norm = normalize(prediction)
-    gold_candidate = normalize(choices[gold_letter])
-    if pred_norm == gold_candidate:
-        return True
-    pred_letter = extract_choice_letter(prediction)
-    if pred_letter == gold_letter:
-        return True
-    full_patterns = [
-        normalize(f"{gold_letter}. {choices[gold_letter]}"),
-        normalize(f"({gold_letter}) {choices[gold_letter]}"),
-    ]
-    if pred_norm in full_patterns:
-        return True
-    return False
+    return extract_final_choice_letter(prediction, choices) == gold_letter
 
 
 VIDEOMME_GRANULARITIES = ["10sec", "30sec", "3min", "10min"]
@@ -356,12 +379,13 @@ def main() -> int:
                 status = "error"
             elapsed_seconds = time.perf_counter() - started_at
 
+            final_answer = extract_final_choice_letter(response, choices)
             correct = evaluate_prediction(response, answer, choices)
             evaluate_true += int(correct)
             emit(log_answer_status(
                 status.upper(),
                 question_id=row["ID"],
-                answer=response,
+                answer=final_answer or "UNPARSEABLE",
                 correct=correct,
                 elapsed_seconds=elapsed_seconds,
             ))
@@ -376,6 +400,7 @@ def main() -> int:
                 "choices": choices,
                 "answer": answer,
                 "response": response,
+                "predicted_answer": final_answer,
                 "round_history": qa_result.round_history if qa_result else [],
                 "num_rounds": qa_result.num_rounds if qa_result else 0,
                 "evaluate": correct,
