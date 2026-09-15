@@ -655,7 +655,7 @@ if [[ "${WITH_EVAL}" == "1" || "${SMOKE}" == "1" ]]; then
 fi
 
 banner "DONE — all requested phases finished"
-MODEL="${MODEL}" WORLDMM_LVBENCH_ROOT="${WORLDMM_LVBENCH_ROOT}" bash "${PROJECT_ROOT}/script/lvbench/check_progress.sh"
+MODEL="${MODEL}" WORLDMM_LVBENCH_ROOT="${WORLDMM_LVBENCH_ROOT:-${LVBENCH_ROOT}}" bash "${PROJECT_ROOT}/script/lvbench/check_progress.sh"
 if [[ "${SMOKE}" == "1" ]]; then
     ok "Smoke eval output: ${EVAL_OUT}"
 elif [[ "${WITH_EVAL}" == "1" ]]; then

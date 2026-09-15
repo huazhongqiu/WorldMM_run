@@ -79,17 +79,23 @@ class SemanticConsolidation:
             existing_triples=formatted_existing_triples
         )
 
-        try:
-            # LLM INFERENCE
-            # Ensure messages is a list for chat-based templates
-            if isinstance(messages, str):
-                raise ValueError("Expected chat template to return List[Dict], got string")
-            response = self.llm_model.generate(messages, text_format=ConsolidationRawOutput)
+        response = None
+        for attempt in range(2):
+            try:
+                # LLM INFERENCE
+                # Ensure messages is a list for chat-based templates
+                if isinstance(messages, str):
+                    raise ValueError("Expected chat template to return List[Dict], got string")
+                response = self.llm_model.generate(messages, text_format=ConsolidationRawOutput)
+                break
 
-        except Exception as e:
-            logger.warning(e)
-            return new_triple, []
-        
+            except Exception as e:
+                if attempt == 0:
+                    logger.warning(f"Consolidation output rejected ({e}); retrying once")
+                    continue
+                logger.warning(f"Consolidation failed after retry: {e}")
+                return new_triple, []
+
         return response.updated_triple, response.triples_to_remove
 
     def batch_semantic_consolidation(self, existing_semantic_results: Tuple[List[List[str]], List[List[str]]], 

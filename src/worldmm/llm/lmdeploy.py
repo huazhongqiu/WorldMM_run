@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import io
+import json
 import logging
 import os
 from typing import Any
 
 from openai import OpenAI
 from pydantic import ValidationError
+
+logger = logging.getLogger(__name__)
 
 # Preprocessing runs thousands of requests per phase; httpx logs every one at
 # INFO and floods the run logs, so keep transport noise out of the handlers.
@@ -120,6 +124,25 @@ class LMDeployModel:
                 text = text[start : end + 1]
         return text
 
+    @staticmethod
+    def _repair_json_text(text: str) -> str | None:
+        """Last-resort repair for near-JSON replies that json.loads rejects.
+
+        Small models occasionally emit Python-style literals (single-quoted
+        strings, True/False/None, trailing commas) inside an otherwise
+        well-formed object; ``ast.literal_eval`` parses those exactly.
+        """
+        try:
+            obj = ast.literal_eval(text)
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            return None
+        if isinstance(obj, (dict, list)):
+            try:
+                return json.dumps(obj, ensure_ascii=False)
+            except (TypeError, ValueError):
+                return None
+        return None
+
     def generate(self, prompt: Any, text_format: Any | None = None, **kwargs: Any) -> Any:
         options = {**self.request_options, **kwargs}
         response = self.sync_client.chat.completions.create(
@@ -134,4 +157,19 @@ class LMDeployModel:
         try:
             return text_format.model_validate_json(content)
         except ValidationError:
-            return text_format.model_validate_json(self._json_payload(content))
+            payload = self._json_payload(content)
+            try:
+                return text_format.model_validate_json(payload)
+            except ValidationError:
+                repaired = self._repair_json_text(payload)
+                if repaired is not None:
+                    try:
+                        return text_format.model_validate_json(repaired)
+                    except ValidationError:
+                        pass
+                logger.warning(
+                    "Unparseable structured output for %s (first 500 chars): %r",
+                    getattr(text_format, "__name__", text_format),
+                    content[:500],
+                )
+                raise

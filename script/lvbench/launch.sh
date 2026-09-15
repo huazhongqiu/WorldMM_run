@@ -21,9 +21,17 @@ SCRATCH="${WORLDMM_LVBENCH_SCRATCH:-/workspace/worldmm/lvbench}"
 LOG_DIR="${SCRATCH}/logs"
 mkdir -p "${LOG_DIR}"
 
-LOG_FILE="${LOG_DIR}/run_all_$(date +%Y%m%d_%H%M%S).log"
+# The platform pod log only keeps the most recent lines and the scratch dir is
+# destroyed with the pod, so tee a second copy straight to shared storage.
+PERSIST_LOG_DIR="${WORLDMM_LVBENCH_PERSIST_LOGDIR:-/myworkspace/projects/output/worldmm/lvbench/logs}"
+mkdir -p "${PERSIST_LOG_DIR}"
+
+RUN_TS="$(date +%Y%m%d_%H%M%S)"
+LOG_FILE="${LOG_DIR}/run_all_${RUN_TS}.log"
+PERSIST_LOG_FILE="${PERSIST_LOG_DIR}/run_all_${RUN_TS}.log"
 echo "[launch] live log also saved to: ${LOG_FILE}"
+echo "[launch] persistent copy: ${PERSIST_LOG_FILE}"
 echo "[launch] follow from another terminal with: tail -f ${LOG_FILE}"
 echo ""
 
-exec bash "${SCRIPT_DIR}/run_all.sh" 2>&1 | tee "${LOG_FILE}"
+exec bash "${SCRIPT_DIR}/run_all.sh" 2>&1 | tee "${LOG_FILE}" "${PERSIST_LOG_FILE}"
