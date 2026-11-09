@@ -120,3 +120,30 @@ If you find WorldMM helpful, please consider citing our paper:
 ## Acknowledgments
 
 Our implementation is built upon [EgoLife](https://github.com/EvolvingLMMs-Lab/EgoLife), [HippoRAG](https://github.com/OSU-NLP-Group/HippoRAG), and [VLM2Vec](https://github.com/TIGER-AI-Lab/VLM2Vec). We thank the authors for open-sourcing their code and dataset.
+
+### Mounted EgoLife Day 5–7 evaluation
+
+The existing `script/run_egolife_test.sh` selects A1_JAKE questions by **query_time** on days 5, 6 and 7 (170 questions). It reads the mounted caption ZIP without writing to `data/`. From the project root:
+
+```bash
+# Single GPU: start Qwen3.5-4B, reuse the provided 30sec OpenIE, extract missing coarser OpenIE.
+bash script/run_egolife_test.sh --prepare-openie-only
+# Single GPU: embedding on cuda:0, no LLM service needed; save time-scoped multiscale snapshots.
+bash script/run_egolife_test.sh --prepare-index-only
+# Later, with two GPUs: use the prepared snapshots for evaluation.
+bash script/run_egolife_test.sh
+```
+
+Persistent OpenIE and snapshots are stored at `/myworkspace/projects/worldmm_needed/egolife/prebuilt/A1_JAKE`; override with `WORLDMM_EGOLIFE_ARTIFACTS_DIR`. Preprocessing logs, extracted caption copies and working caches are saved under its `runs/` subdirectory unless `--output-dir` is supplied. Each snapshot includes only captions ending before or at the question time. Workers load private copies; incompatible or missing snapshots fail rather than silently rebuilding. Identity checks cover caption timestamps/text, base and prepared OpenIE, and the embedding and retrieval model paths/names. Preparation resumes complete OpenIE batches and snapshots. Keep the same input files and model settings across both stages and evaluation; use a new artifact directory when changing them. Repeated timestamp snapshots and worker copies can consume substantial disk space. OpenIE generation uses the configured local Qwen model for coarser captions; provided base OpenIE remains GPT-generated.
+
+The evaluator also exposes `--query-days`, `--episodic-artifacts-dir`, `--prepare-openie-only` and `--prepare-index-only` directly. Supplying an artifact directory during evaluation requires all selected timestamps to have complete snapshots. A caption ZIP may be passed to `--caption-dir`; extraction goes into the run output directory. These options do not change the legacy 10sec OpenIE policy used by other benchmarks.
+
+
+OpenIE preparation uses schema-constrained deterministic generation for entities and triples. Long caption text is extracted in segments of at most 1200 characters, preferring paragraph/word boundaries, and triples are deduplicated under the original caption ID and timestamp. A truncated segment is split further rather than retrying the same overlong input. This changes extraction context but preserves the four retrieval granularities. Completed legacy OpenIE records remain reusable; newly extracted records include a `bounded-openie-v1` policy marker. Every successful caption is saved independently, including when another caption in the batch fails. Only complete JSON documents are accepted: explanatory prose outside a complete JSON document is ignored, but truncated output is rejected explicitly. These format settings apply only to OpenIE; QA sampling remains unchanged.
+
+After an interrupted preparation run, resume with:
+
+```bash
+bash script/run_egolife_test.sh --prepare-openie-only &&
+bash script/run_egolife_test.sh --prepare-index-only
+```

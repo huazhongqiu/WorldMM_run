@@ -25,6 +25,10 @@ class LMDeployConfigurationError(ValueError):
     """Raised when the local LMDeploy endpoint is not configured."""
 
 
+class StructuredOutputTruncatedError(ValueError):
+    """The output cap was reached; retrying the same input cannot ensure complete JSON."""
+
+
 class LMDeployModel:
     """Small adapter from WorldMM prompts to LMDeploy chat completions."""
 
@@ -116,15 +120,15 @@ class LMDeployModel:
         it; ``model_validate_json`` rejects both, so strip them before parsing.
         """
         text = content.strip()
-        if text.startswith("```"):
-            text = text.strip("`").lstrip()
-            if "\n" in text:
-                text = text.split("\n", 1)[1]
         start = min((i for i in (text.find("{"), text.find("[")) if i != -1), default=-1)
-        if start > 0:
-            end = max(text.rfind("}"), text.rfind("]"))
-            if end > start:
-                text = text[start : end + 1]
+        if start >= 0:
+            candidate = text[start:]
+            try:
+                _, end = json.JSONDecoder().raw_decode(candidate)
+                return candidate[:end]
+            except json.JSONDecodeError:
+                # Preserve the original invalid document for validation/limited literal repair.
+                return candidate.rstrip("`\n ")
         return text
 
     @staticmethod
@@ -148,15 +152,34 @@ class LMDeployModel:
 
     def generate(self, prompt: Any, text_format: Any | None = None, **kwargs: Any) -> Any:
         options = {**self.request_options, **kwargs}
+        messages = self._messages(prompt)
+        if text_format is not None and text_format.__name__ in ("NerRawOutput", "TripleRawOutput"):
+            schema = text_format.model_json_schema()
+            schema["additionalProperties"] = False
+            if text_format.__name__ == "TripleRawOutput":
+                schema["properties"]["triples"]["items"].update(minItems=3, maxItems=3)
+                schema["properties"]["triples"]["items"]["items"]["minLength"] = 1
+            options["response_format"] = {"type": "json_schema", "json_schema": {
+                "name": text_format.__name__, "strict": True, "schema": schema}}
+            options["temperature"] = 0
+            messages = [dict(message) for message in messages]
+            instruction = "Return only compact JSON on one line without Markdown or explanation."
+            if messages and messages[0]["role"] == "system":
+                messages[0]["content"] += "\n" + instruction
+            else:
+                messages.insert(0, {"role": "system", "content": instruction})
         response = self.sync_client.chat.completions.create(
             model=self.model_name,
-            messages=self._messages(prompt),
+            messages=messages,
             **options,
         )
         self._add_usage(response)
         content = response.choices[0].message.content or ""
         if text_format is None:
             return content
+        if getattr(response.choices[0], "finish_reason", None) == "length":
+            raise StructuredOutputTruncatedError(
+                f"Structured output truncated at max_tokens={options.get('max_tokens')}; reduce the input length")
         try:
             return text_format.model_validate_json(content)
         except ValidationError:

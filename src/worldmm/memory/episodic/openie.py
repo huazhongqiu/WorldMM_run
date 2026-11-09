@@ -7,6 +7,7 @@ import logging
 
 from .utils import compute_mdhash_id, filter_invalid_triples, NerRawOutput, TripleRawOutput, NerOutput, TripleOutput
 from ...llm import dynamic_retry_decorator, LLMModel, PromptTemplateManager
+from ...llm.lmdeploy import StructuredOutputTruncatedError
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ class OpenIE:
         except Exception as e:
             # For any other unexpected exceptions, log them and return with the error message
             logger.warning(e)
-            metadata.update({'error': str(e)})
+            metadata.update({'error': str(e), 'output_truncated': isinstance(e, StructuredOutputTruncatedError)})
             return NerOutput(
                 chunk_id=chunk_key,
                 unique_entities=[],
@@ -83,7 +84,7 @@ class OpenIE:
 
         except Exception as e:
             logger.warning(f"Exception for chunk {chunk_key}: {e}")
-            metadata.update({'error': str(e)})
+            metadata.update({'error': str(e), 'output_truncated': isinstance(e, StructuredOutputTruncatedError)})
             return TripleOutput(
                 chunk_id=chunk_key,
                 triples=[],

@@ -91,10 +91,11 @@ def test_parallel_evaluator_preserves_input_order_and_uses_multiple_threads() ->
     assert len(thread_ids) >= 2
 
 
-def test_test_runner_uses_the_committed_day6_day7_manifest() -> None:
+def test_test_runner_selects_day5_to_day7() -> None:
     script = ROOT / "script" / "run_egolife_test.sh"
     content = script.read_text(encoding="utf-8")
-    assert 'eval/splits/egolife_a1_jake_day6_day7_test.json' in content
+    assert '--query-days 5 6 7' in content
+    assert '--episodic-artifacts-dir' in content
     assert '--workers "${WORKERS}"' in content
 
 
@@ -320,3 +321,10 @@ def test_openie_reports_throttled_ner_and_triple_progress(tmp_path: Path) -> Non
         assert ("triples", 2, 2) in events
     finally:
         sys.path.remove(str(ROOT / "src"))
+
+
+def test_preprocessing_defaults_to_persistent_worldmm_needed_directory():
+    content = (ROOT / "script" / "run_egolife_test.sh").read_text()
+    assert "/myworkspace/projects/worldmm_needed/egolife/prebuilt/A1_JAKE" in content
+    assert 'OUTPUT_DIR="$ARTIFACTS_DIR/runs/' in content
+    assert '"$OUTPUT_DIR_EXPLICIT" == "0"' in content

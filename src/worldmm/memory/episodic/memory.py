@@ -5,6 +5,10 @@ Episodic Memory module for WorldMM.
 import json
 import logging
 import os
+import hashlib
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Callable, Dict, List, Any, Optional, Tuple, Union
 from dataclasses import dataclass
 
@@ -143,9 +147,17 @@ class EpisodicMemory:
         self.indexed_entries: Dict[str, List[CaptionEntry]] = {g: [] for g in self.granularities}
         self.indexed_time: int = 0  # 0 means nothing indexed yet
         self.precomputed_openie: Optional[Dict[str, Dict[str, Any]]] = None
+        self.base_granularity = "10sec"
+        self.extract_coarse_openie = False
+        self.prepared_openie_dir = None
+        self.snapshot_root = None
+        self.snapshot_load_only = False
+        self.worker_cache_root = save_dir_root
 
-    def load_precomputed_openie(self, file_path: str) -> None:
+    def load_precomputed_openie(self, file_path: str, base_granularity: str = "10sec", extract_coarse: bool = False) -> None:
         """Load offline 10-second NER/triples for HippoRAG cache seeding."""
+        self.base_granularity = base_granularity
+        self.extract_coarse_openie = extract_coarse
         data = _load_json(file_path)
         ner_results = data.get("ner_results") if isinstance(data, dict) else None
         triple_results = data.get("triple_results") if isinstance(data, dict) else None
@@ -157,25 +169,115 @@ class EpisodicMemory:
         }
 
     def _seed_precomputed_openie(self, hipporag: HippoRAG, passages: List[str], granularity: str) -> None:
-        """Mark every passage extracted so HippoRAG never calls online OpenIE."""
+        """Seed eligible cached facts; EgoLife leaves unknown passages for real extraction."""
         if self.precomputed_openie is None:
             return
         ner_results = self.precomputed_openie["ner_results"]
         triple_results = self.precomputed_openie["triple_results"]
-        docs_by_id: Dict[str, Dict[str, Any]] = {}
+        target = hipporag.openie_results_path
+        docs_by_id = {}
+        if self.extract_coarse_openie and os.path.isfile(target):
+            docs_by_id = {doc["idx"]: doc for doc in _load_json(target)["docs"]}
+        if getattr(self, "prepared_openie_dir", None):
+            prepared = Path(self.prepared_openie_dir) / f"{granularity}.json"
+            if prepared.exists():
+                docs_by_id.update({doc["idx"]: doc for doc in _load_json(str(prepared))["docs"]})
+        # Only seed eligible passages. Future passages must never enter a time-scoped graph.
+        selected = {}
         for passage in passages:
             chunk_id = compute_mdhash_id(passage, prefix="chunk-")
-            docs_by_id[chunk_id] = {
-                "idx": chunk_id,
-                "passage": passage,
-                "extracted_entities": ner_results.get(chunk_id, []) if granularity == "10sec" else [],
-                "extracted_triples": triple_results.get(chunk_id, []) if granularity == "10sec" else [],
-            }
-        target = hipporag.openie_results_path
+            if chunk_id in docs_by_id:
+                selected[chunk_id] = docs_by_id[chunk_id]
+            elif granularity == self.base_granularity and chunk_id in ner_results and chunk_id in triple_results:
+                selected[chunk_id] = {"idx": chunk_id, "passage": passage,
+                    "extracted_entities": ner_results[chunk_id], "extracted_triples": triple_results[chunk_id]}
+            elif not self.extract_coarse_openie:
+                selected[chunk_id] = {"idx": chunk_id, "passage": passage,
+                    "extracted_entities": [], "extracted_triples": []}
+        if getattr(self, "require_precomputed_openie", False) and len(selected) != len(set(passages)):
+            raise ValueError(f"Incomplete precomputed OpenIE for {granularity}")
         os.makedirs(os.path.dirname(target), exist_ok=True)
         with open(target, "w", encoding="utf-8") as handle:
-            json.dump({"docs": list(docs_by_id.values())}, handle, ensure_ascii=False)
-    
+            json.dump({"docs": list(selected.values())}, handle, ensure_ascii=False)
+
+    def configure_snapshots(self, root: str, load_only: bool = True) -> None:
+        self.snapshot_root = Path(root)
+        self.snapshot_load_only = load_only
+
+    def _snapshot_identity(self, until_time: int) -> Dict[str, Any]:
+        captions = {g: [(e.text, e.date, e.start_time, e.end_time) for e in entries
+                        if e.timestamp_int[1] <= until_time]
+                    for g, entries in self.captions.items()}
+        payload = json.dumps(captions, sort_keys=True).encode()
+        openie_hash = hashlib.sha256(json.dumps(self.precomputed_openie, sort_keys=True).encode()).hexdigest()
+        prepared = {}
+        if self.prepared_openie_dir:
+            prepared = {f.name: self._file_hash(f) for f in sorted(Path(self.prepared_openie_dir).glob("*.json"))}
+        return {"version": 2, "until_time": until_time, "prepared_openie": prepared,
+                "captions": hashlib.sha256(payload).hexdigest(), "base_openie": openie_hash,
+                "embedding": self.embedding_model.text_model_name,
+                "llm": self.llm_model.model_name}
+
+    @staticmethod
+    def _file_hash(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    def save_snapshot(self, until_time: int) -> None:
+        if self.snapshot_root is None or self.indexed_time != until_time:
+            raise ValueError("Cannot save snapshot before indexing its exact timestamp")
+        destination = self.snapshot_root / str(until_time)
+        if destination.exists():
+            raise FileExistsError(f"Snapshot exists; use a new preparation directory: {destination}")
+        self.snapshot_root.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=f".{until_time}-", dir=self.snapshot_root))
+        for g in self.hipporag:
+            shutil.copytree(Path(self.save_dir_root) / g, temporary / g)
+            h = self.hipporag[g]
+            # HippoRAG's graph pickle alone does not persist these incremental/retrieval maps.
+            runtime = {"node_stats": [[a, b, weight] for (a, b), weight in getattr(h, "node_to_node_stats", {}).items()],
+                       "entity_chunks": {key: sorted(values) for key, values in (getattr(h, "ent_node_to_chunk_ids", None) or {}).items()}}
+            (temporary / g / "snapshot_runtime.json").write_text(json.dumps(runtime))
+        files = {str(f.relative_to(temporary)): self._file_hash(f)
+                 for f in temporary.rglob("*") if f.is_file()}
+        manifest = {"identity": self._snapshot_identity(until_time),
+                    "granularities": list(self.hipporag), "files": files}
+        (temporary / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        temporary.rename(destination)
+
+    def _load_snapshot(self, until_time: int) -> None:
+        source = self.snapshot_root / str(until_time)
+        manifest = _load_json(str(source / "manifest.json"))
+        if manifest["identity"] != self._snapshot_identity(until_time):
+            raise ValueError(f"Snapshot identity mismatch: {source}")
+        for relative, checksum in manifest["files"].items():
+            path = source / relative
+            if not path.resolve().is_relative_to(source.resolve()) or self._file_hash(path) != checksum:
+                raise ValueError(f"Snapshot file mismatch: {path}")
+        # Each load has a private mutable working copy; persistent snapshots remain immutable.
+        Path(self.worker_cache_root).mkdir(parents=True, exist_ok=True)
+        destination = Path(tempfile.mkdtemp(prefix=f"snapshot-{until_time}-", dir=self.worker_cache_root))
+        for g in manifest["granularities"]:
+            if g not in self.granularities:
+                raise ValueError(f"Unknown snapshot granularity: {g}")
+            shutil.copytree(source / g, destination / g)
+        self.hipporag = {}
+        self.save_dir_root = str(destination)
+        for g in manifest["granularities"]:
+            h = self._get_or_create_hipporag(g)
+            runtime = _load_json(str(destination / g / "snapshot_runtime.json"))
+            h.node_to_node_stats = {(a, b): weight for a, b, weight in runtime["node_stats"]}
+            h.ent_node_to_chunk_ids = {key: set(values) for key, values in runtime["entity_chunks"].items()}
+            expected = {e.text for e in self.captions[g] if e.timestamp_int[1] <= until_time}
+            if hasattr(h, "chunk_embedding_store") and set(h.chunk_embedding_store.get_all_texts()) != expected:
+                raise ValueError(f"Snapshot contains missing or future passages: {g}")
+        self.indexed_entries = {g: [e for e in entries if e.timestamp_int[1] <= until_time]
+                                for g, entries in self.captions.items()}
+        self.indexed_time = until_time
+
     def _get_or_create_hipporag(self, granularity: str) -> HippoRAG:
         """Get or create HippoRAG instance for a granularity level."""
         if granularity not in self.hipporag:
@@ -264,6 +366,10 @@ class EpisodicMemory:
             until_time: Timestamp in integer format (day + time.zfill(8)) - index all 
                        captions with end_time <= this value
         """
+        if self.snapshot_load_only:
+            self._load_snapshot(until_time)
+            return
+
         # If already indexed beyond this time, no need to recompute
         if self.indexed_time >= until_time:
             logger.debug(f"Already indexed up to {self.indexed_time}, skipping index for {until_time}")

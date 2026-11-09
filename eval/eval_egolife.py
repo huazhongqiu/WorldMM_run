@@ -4,6 +4,7 @@ EgoLifeQA evaluation script using WorldMM unified memory system.
 """
 
 import os
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import count
 from threading import Lock, local
@@ -132,6 +133,7 @@ class WorkflowProgressLogger:
             elapsed=f"{elapsed_seconds:.2f}s",
         )
 
+from egolife_precompute import configure_memory, prepare_openie, prepare_indexes
 from reporting import build_report_rows, write_report
 
 from worldmm.embedding import EmbeddingModel
@@ -452,6 +454,7 @@ def evaluate_parallel_egolife(
             visual=args.visual_top_k,
         )
         memory.load_episodic_captions(caption_files=episodic_caption_files)
+        configure_memory(memory.episodic_memory, args)
         memory.load_semantic_triples(data=semantic_results)
         memory.load_visual_clips(
             embeddings_path=visual_path,
@@ -627,6 +630,11 @@ def write_parallel_outputs(args: argparse.Namespace, results: List[Dict[str, Any
 
 def main():
     parser = argparse.ArgumentParser(description="EgoLifeQA Evaluation with WorldMM")
+    parser.add_argument("--query-days", nargs="+", type=int, help="Select questions by query day, e.g. 5 6 7")
+    parser.add_argument("--episodic-artifacts-dir", help="Persistent OpenIE and timestamp snapshot root")
+    preparation = parser.add_mutually_exclusive_group()
+    preparation.add_argument("--prepare-openie-only", action="store_true")
+    preparation.add_argument("--prepare-index-only", action="store_true")
     parser.add_argument("--subject", type=str, default="A1_JAKE", help="Subject ID")
     parser.add_argument("--workers", type=int, default=1, help="Question-level worker count; use 1 for serial evaluation")
     parser.add_argument("--question-ids-file", type=str, default=None, help="JSON manifest of EgoLife question IDs")
@@ -648,6 +656,10 @@ def main():
     parser.add_argument("--limit", type=int, default=None, help="Maximum questions; use only for smoke")
     args = parser.parse_args()
     configure_console_logging()
+    if (args.prepare_openie_only or args.prepare_index_only) and not args.episodic_artifacts_dir:
+        parser.error("Preparation requires --episodic-artifacts-dir")
+    if args.workers == 1 and args.cache_dir:
+        os.makedirs(args.cache_dir, exist_ok=True)
 
 
     # Initialize models
@@ -671,6 +683,7 @@ def main():
         retriever_llm_model=retriever_llm_model,
         respond_llm_model=respond_llm_model,
         prompt_template_manager=prompt_template_manager,
+        episodic_cache_root=args.cache_dir or os.path.join(args.output_dir, "cache"),
         max_rounds=args.max_rounds,
         max_errors=args.max_errors,
     )
@@ -689,10 +702,23 @@ def main():
     
     eval_data_path = os.path.join(data_dir, f"EgoLifeQA/EgoLifeQA_{subject}.json")
     eval_data = load_json(eval_data_path)
+    if args.query_days:
+        eval_data = [row for row in eval_data if int(row["query_time"]["date"].upper().replace("DAY", "")) in args.query_days]
     eval_data = select_evaluation_rows(eval_data, args.question_ids_file, args.limit)
+    if not eval_data:
+        parser.error("No questions selected")
     
     # Load episodic captions for all granularities (multiscale memory)
     caption_root = args.caption_dir or data_dir
+    if caption_root.endswith(".zip"):
+        destination = Path(args.output_dir) / "captions"
+        with zipfile.ZipFile(caption_root) as archive:
+            for granularity in ("30sec", "3min", "10min", "1h"):
+                member = f"data/EgoLife/EgoLifeCap/{subject}/{subject}_{granularity}.json"
+                target = destination / member
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(archive.read(member))
+        caption_root = str(destination / "data/EgoLife")
     episodic_caption_dir = os.path.join(caption_root, f"EgoLifeCap/{subject}")
     granularities = ["30sec", "3min", "10min", "1h"]
     episodic_caption_files = {
@@ -702,6 +728,22 @@ def main():
     # Load 30sec captions separately for target time parsing
     episodic_captions_30sec = load_json(episodic_caption_files["30sec"])
     
+    world_memory.load_episodic_captions(caption_files=episodic_caption_files)
+    configure_memory(world_memory.episodic_memory, args)
+    if args.prepare_openie_only:
+        prepare_openie(world_memory.episodic_memory, Path(args.episodic_artifacts_dir) / "openie", max(_query_time(r) for r in eval_data))
+        return
+    if args.prepare_index_only:
+        prepare_indexes(world_memory.episodic_memory, [_query_time(r) for r in eval_data])
+        return
+    # Validate all requested snapshots before starting evaluation or worker GPU loads.
+    if args.episodic_artifacts_dir:
+        episodic = world_memory.episodic_memory
+        for timestamp in sorted({_query_time(r) for r in eval_data}):
+            manifest = load_json(str(episodic.snapshot_root / str(timestamp) / "manifest.json"))
+            if manifest["identity"] != episodic._snapshot_identity(timestamp):
+                raise ValueError(f"Snapshot identity mismatch: {timestamp}")
+
     # Load semantic results
     metadata_dir = args.metadata_dir or "output/metadata"
     semantic_candidates = glob.glob(os.path.join(metadata_dir, f"semantic_memory/{subject}/semantic_consolidation_results_*.json"))
@@ -729,7 +771,7 @@ def main():
     logger.info("Loading data into WorldMemory...")
     
     # Load episodic captions for all granularities
-    world_memory.load_episodic_captions(caption_files=episodic_caption_files)
+    # Captions and precomputed OpenIE were loaded above.
     
     # Load semantic triples
     world_memory.load_semantic_triples(data=semantic_results)
