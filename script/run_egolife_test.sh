@@ -10,7 +10,7 @@ PREPARE=""
 OUTPUT_DIR_EXPLICIT=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --prepare-openie-only|--prepare-index-only) PREPARE="$1"; shift ;;
+    --prepare-openie-only|--prepare-index-only|--reextract-hourly-openie) PREPARE="$1"; shift ;;
     --workers) WORKERS="$2"; shift 2 ;;
     --output-dir) OUTPUT_DIR="$2"; OUTPUT_DIR_EXPLICIT=1; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
@@ -84,7 +84,7 @@ wait_for_lmdeploy() {
   return 1
 }
 
-if [[ "$PREPARE" == "--prepare-openie-only" ]]; then
+if [[ "$PREPARE" == "--prepare-openie-only" || "$PREPARE" == "--reextract-hourly-openie" ]]; then
   LMDEPLOY_PROFILE=debug-1gpu
 fi
 if [[ "$PREPARE" == "--prepare-index-only" ]]; then
@@ -111,7 +111,11 @@ fi
 fi
 
 echo "========== 评测配置 =========="
-echo "query_days=5,6,7 questions=170 workers=${WORKERS} max_rounds=${MAX_ROUNDS} output=${OUTPUT_DIR}"
+if [[ "$PREPARE" == "--reextract-hourly-openie" ]]; then
+  echo "mode=reextract_hourly_openie scope=all_loaded_hourly_captions output=${OUTPUT_DIR}"
+else
+  echo "query_days=5,6,7 questions=170 workers=${WORKERS} max_rounds=${MAX_ROUNDS} output=${OUTPUT_DIR}"
+fi
 echo "日志将显示每个 worker 的索引、检索轮次与最终答案。"
 export PYTHONUNBUFFERED=1
 export TQDM_DISABLE=1

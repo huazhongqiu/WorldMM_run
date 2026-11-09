@@ -2,6 +2,8 @@
 import json
 import os
 import tempfile
+import copy
+import shutil
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from worldmm.memory.episodic.openie import OpenIE
@@ -119,6 +121,39 @@ def prepare_openie(memory, directory, until_time, extractor=None):
                 if errors:
                     raise RuntimeError("OpenIE incomplete; saved successful captions. " + "; ".join(errors))
                 print(f"OpenIE {granularity}: extracted={min(offset+16,len(missing))}/{len(missing)}", flush=True)
+
+
+def reextract_hourly(memory, directory, extractor=None):
+    """Resume a separate all-week hourly rebuild and publish only when complete."""
+    directory = Path(directory)
+    entries = memory.captions.get("1h", [])
+    if not entries:
+        raise ValueError("No hourly captions loaded")
+    workspace = directory.parent / "hourly_reextract"
+    staging = workspace / "bounded-v1"
+    hourly = copy.copy(memory)
+    hourly.captions = {"1h": entries}
+    expected = {compute_mdhash_id(e.text, prefix="chunk-"): e.text for e in entries}
+    prepared = staging / "1h.json"
+    if prepared.exists():
+        for doc in json.loads(prepared.read_text())["docs"]:
+            if (doc["idx"] not in expected or doc["passage"] != expected[doc["idx"]]
+                    or doc.get("extraction", {}).get("policy") != "bounded-openie-v1"
+                    or doc["extraction"].get("max_segment_chars") != 1200):
+                raise ValueError(f"Incompatible hourly rebuild checkpoint: {prepared}")
+    print(f"Hourly rebuild: all_week={len(entries)} unique={len(expected)} staging={staging}", flush=True)
+    prepare_openie(hourly, staging, max(e.timestamp_int[1] for e in entries), extractor=extractor)
+    result = json.loads(prepared.read_text())
+    if {d["idx"] for d in result["docs"]} != set(expected):
+        raise ValueError("Hourly rebuild incomplete; active OpenIE was not replaced")
+    active = directory / "1h.json"
+    backup = workspace / "legacy-1h.json"
+    if active.exists() and not backup.exists():
+        workspace.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(active, backup)
+    # Atomic publication leaves the prior active artifact intact on extraction failure.
+    write_json(active, result)
+    print(f"Hourly rebuild complete: {len(result['docs'])}/{len(expected)} active={active} backup={backup}", flush=True)
 
 
 def prepare_indexes(memory, times):

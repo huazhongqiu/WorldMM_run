@@ -147,3 +147,12 @@ After an interrupted preparation run, resume with:
 bash script/run_egolife_test.sh --prepare-openie-only &&
 bash script/run_egolife_test.sh --prepare-index-only
 ```
+
+
+To uniformly re-extract **all 64 hourly captions**, including the one ending after the last test question, use the existing launcher:
+
+```bash
+bash script/run_egolife_test.sh --reextract-hourly-openie
+```
+
+This ignores legacy hourly OpenIE and other granularities, resuming only matching `bounded-openie-v1` checkpoints in `hourly_reextract/bounded-v1/1h.json` under the artifact root. All hourly captions use the same 1200-character segmentation policy. After all captions succeed, the prior active `openie/1h.json` is preserved once as `hourly_reextract/legacy-1h.json`, and the complete new result atomically replaces it. Other granularities remain untouched. Existing index snapshots become incompatible when hourly OpenIE changes; rebuild snapshots in a new artifact root before evaluating if snapshots already exist. Query-day selection still governs evaluation, not this all-week hourly re-extraction.

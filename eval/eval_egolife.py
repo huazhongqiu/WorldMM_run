@@ -133,7 +133,7 @@ class WorkflowProgressLogger:
             elapsed=f"{elapsed_seconds:.2f}s",
         )
 
-from egolife_precompute import configure_memory, prepare_openie, prepare_indexes
+from egolife_precompute import configure_memory, prepare_openie, prepare_indexes, reextract_hourly
 from reporting import build_report_rows, write_report
 
 from worldmm.embedding import EmbeddingModel
@@ -635,6 +635,7 @@ def main():
     preparation = parser.add_mutually_exclusive_group()
     preparation.add_argument("--prepare-openie-only", action="store_true")
     preparation.add_argument("--prepare-index-only", action="store_true")
+    preparation.add_argument("--reextract-hourly-openie", action="store_true", help="Re-extract ALL hourly captions with bounded-openie-v1; resume a separate checkpoint")
     parser.add_argument("--subject", type=str, default="A1_JAKE", help="Subject ID")
     parser.add_argument("--workers", type=int, default=1, help="Question-level worker count; use 1 for serial evaluation")
     parser.add_argument("--question-ids-file", type=str, default=None, help="JSON manifest of EgoLife question IDs")
@@ -656,7 +657,7 @@ def main():
     parser.add_argument("--limit", type=int, default=None, help="Maximum questions; use only for smoke")
     args = parser.parse_args()
     configure_console_logging()
-    if (args.prepare_openie_only or args.prepare_index_only) and not args.episodic_artifacts_dir:
+    if (args.prepare_openie_only or args.prepare_index_only or args.reextract_hourly_openie) and not args.episodic_artifacts_dir:
         parser.error("Preparation requires --episodic-artifacts-dir")
     if args.workers == 1 and args.cache_dir:
         os.makedirs(args.cache_dir, exist_ok=True)
@@ -730,6 +731,9 @@ def main():
     
     world_memory.load_episodic_captions(caption_files=episodic_caption_files)
     configure_memory(world_memory.episodic_memory, args)
+    if args.reextract_hourly_openie:
+        reextract_hourly(world_memory.episodic_memory, Path(args.episodic_artifacts_dir) / "openie")
+        return
     if args.prepare_openie_only:
         prepare_openie(world_memory.episodic_memory, Path(args.episodic_artifacts_dir) / "openie", max(_query_time(r) for r in eval_data))
         return

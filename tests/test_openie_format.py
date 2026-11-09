@@ -112,3 +112,44 @@ def test_openie_keeps_one_initial_system_message_and_does_not_mutate_prompt():
     assert [m["role"] for m in messages] == ["system", "user"]
     assert "Original instructions" in messages[0]["content"]
     assert prompt[0]["content"] == "Original instructions"
+
+
+def test_hourly_reextraction_covers_entire_week_without_reusing_legacy(tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
+    from egolife_precompute import reextract_hourly
+    entries = [SimpleNamespace(text=text, timestamp_int=(0,time)) for text,time in [("past",1),("future",200)]]
+    memory = SimpleNamespace(captions={"1h": entries}, llm_model=SimpleNamespace(model_name="llm"),
+                             base_granularity="30sec", _snapshot_identity=lambda t: {"base_openie": "hash"})
+    output=tmp_path / "openie"; output.mkdir()
+    legacy={"provenance": {"llm":"llm","base_openie":"hash"},"docs":[{"idx":"old","passage":"past"}]}
+    (output / "1h.json").write_text(json.dumps(legacy))
+    (output / "3min.json").write_text("keep this unchanged")
+    calls=[]
+    class Extractor:
+        def ner(self, key, text):
+            calls.append(text)
+            return SimpleNamespace(unique_entities=["I"], metadata={})
+        def triple_extraction(self, key, text, entities):
+            return SimpleNamespace(triples=[["I","hold","cup"]],metadata={})
+    reextract_hourly(memory,output,extractor=Extractor())
+    docs=json.loads((output / "1h.json").read_text())["docs"]
+    assert {d["passage"] for d in docs} == {"past","future"}
+    assert all(d["extraction"]["policy"] == "bounded-openie-v1" for d in docs)
+    assert calls == ["past","future"] or calls == ["future","past"]
+    assert (output / "3min.json").read_text() == "keep this unchanged"
+    backup=tmp_path / "hourly_reextract" / "legacy-1h.json"
+    assert json.loads(backup.read_text()) == legacy
+    reextract_hourly(memory,output,extractor=Extractor())
+    assert len(calls)==2
+
+
+def test_incomplete_hourly_reextraction_keeps_original_active(tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
+    from egolife_precompute import reextract_hourly
+    memory = SimpleNamespace(captions={"1h":[SimpleNamespace(text="bad",timestamp_int=(0,1))]},
+                             llm_model=SimpleNamespace(model_name="llm"),base_granularity="30sec",_snapshot_identity=lambda t:{"base_openie":"hash"})
+    output=tmp_path / "openie";output.mkdir();(output/"1h.json").write_text("original")
+    class Extractor:
+        def ner(self,key,text):return SimpleNamespace(unique_entities=[],metadata={"error":"failed"})
+    with pytest.raises(RuntimeError):reextract_hourly(memory,output,extractor=Extractor())
+    assert (output/"1h.json").read_text()=="original"
