@@ -135,6 +135,7 @@ class WorkflowProgressLogger:
 
 from egolife_precompute import configure_memory, prepare_openie, prepare_indexes, reextract_hourly
 from reporting import build_report_rows, write_report
+from choice_validation import extract_choice_letter, is_completed_choice_result
 
 from worldmm.embedding import EmbeddingModel
 from worldmm.llm import LLMModel, PromptTemplateManager
@@ -150,20 +151,6 @@ def load_json(file_path: str) -> Any:
 def normalize(text: str) -> str:
     """Normalize text for comparison."""
     return text.lower().strip().rstrip(".,)")
-
-
-def extract_choice_letter(text: str) -> Optional[str]:
-    """Extract a final multiple-choice letter without mistaking reasoning prose for one."""
-    marked_answers = re.findall(
-        r"\b(?:final\s+)?answer\s*(?:is\s*)?[:\-]?\s*\(?([A-Za-z])\b",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if marked_answers:
-        return marked_answers[-1].upper()
-
-    match = re.match(r"\s*\(?([A-Za-z])(?:[\.\)]|\s*$)", text)
-    return match.group(1).upper() if match else None
 
 
 def evaluate_prediction(prediction: str, gold_letter: str, choices: Dict[str, str]) -> bool:
@@ -582,6 +569,7 @@ def evaluate_parallel_egolife(
             "query_time": query_time,
             "target_time": parse_target_time(row, episodic_captions_30sec),
         }
+        result["completed"] = is_completed_choice_result(result)
         workflow.answer(
             worker=state.worker_id, question_id=row["ID"], answer=response,
             rounds=result["num_rounds"], total_tokens=total_tokens, elapsed_seconds=elapsed_seconds,
@@ -795,7 +783,7 @@ def main():
             semantic_results, visual_path, visual_clips,
         )
         write_parallel_outputs(args, results)
-        if args.require_complete and any(not r["completed"] or not extract_choice_letter(r["response"]) for r in results):
+        if args.require_complete and any(not is_completed_choice_result(r) for r in results):
             raise SystemExit(2)
         return
     
@@ -884,6 +872,7 @@ def main():
             #     for start, end in target_time_list
             # ],
         }
+        result_entry["completed"] = is_completed_choice_result(result_entry)
         results.append(result_entry)
 
         logger.info(
@@ -915,7 +904,7 @@ def main():
     logger.info(f"Evaluation Complete")
     logger.info(f"Subject: {subject}")
     logger.info(f"Total: {len(results)}")
-    if args.require_complete and any(not r["completed"] or not extract_choice_letter(r["response"]) for r in results):
+    if args.require_complete and any(not is_completed_choice_result(r) for r in results):
         raise SystemExit(2)
     logger.info(f"Correct: {evaluate_true}")
     logger.info(f"Accuracy: {final_accuracy:.4f}")

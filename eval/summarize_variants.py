@@ -4,6 +4,11 @@ import argparse
 import json
 from pathlib import Path
 
+try:
+    from .choice_validation import is_completed_choice_result
+except ImportError:
+    from choice_validation import is_completed_choice_result
+
 
 def summarize(expected_ids, results):
     latest = {str(row["ID"]): row for row in results}
@@ -15,8 +20,9 @@ def summarize(expected_ids, results):
         if row is None:
             missing.append(question_id)
             continue
-        response = str(row.get("response", "")).strip()
-        completed = row.get("status") == "success" or row.get("completed") is True
+        response = str(row.get("response") or "").strip()
+        completed = (row["status"] == "success" if "status" in row
+                     else is_completed_choice_result(row))
         if completed and response and response not in ("Error", "Unable to generate answer"):
             valid[question_id] = row
         else:
