@@ -653,6 +653,7 @@ Step 2 (only if search): Pick one memory type (episodic/semantic/visual) and for
         self.semantic_memory.triple_id_to_entry.clear()
         self.semantic_memory.timestamp_to_triples.clear()
         self.semantic_memory.available_timestamps.clear()
+        self.semantic_memory.vector_store = None
         self.visual_memory.clips.clear()
         self.visual_memory.clip_id_to_entry.clear()
         self.visual_memory.embedding_lookup.clear()

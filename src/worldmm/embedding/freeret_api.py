@@ -87,6 +87,11 @@ class FreeRetAPI:
         """Decode a WorldMM source-time interval, never send a filename as text."""
         import cv2
         spec = {'video': str(spec)} if isinstance(spec, (str, Path)) else dict(spec)
+        if 'frame_timestamps' in spec:
+            frames, timestamps = spec['video'], spec['frame_timestamps']
+            if len(frames) != nframes or len(timestamps) != nframes:
+                raise ValueError('Predecoded frame count does not match the requested budget')
+            return (frames, timestamps) if with_timestamps else frames
         if 'video' not in spec:
             raise ValueError("Video dictionaries must contain 'video'")
         capture = cv2.VideoCapture(str(spec['video']))

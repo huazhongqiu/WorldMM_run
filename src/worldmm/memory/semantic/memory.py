@@ -4,6 +4,8 @@ Semantic Memory module for WorldMM.
 
 import json
 import logging
+from pathlib import Path
+import numpy as np
 import torch
 import torch.nn.functional as F
 import igraph as ig
@@ -103,6 +105,20 @@ class SemanticMemory:
         self.graph: Optional[ig.Graph] = None
         self.embeddings: Optional[torch.Tensor] = None
         self.triple_to_entities: Dict[str, Tuple[str, str]] = {}
+        self.vector_store = None
+
+    def load_vector_store(self, directory, consolidation_file) -> None:
+        import hashlib
+        from hipporag.embedding_store import EmbeddingStore
+        from ...index_manifest import embedding_identity, ensure_manifest
+
+        directory = Path(directory)
+        if not (directory / "index_manifest.json").is_file():
+            raise FileNotFoundError(f"Missing semantic index manifest: {directory}")
+        with open(consolidation_file, "rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        ensure_manifest(directory, {"embedding": embedding_identity(self.embedding_model), "consolidation": digest})
+        self.vector_store = EmbeddingStore(self.embedding_model, str(directory / "triples"), 4, "semantic")
     
     def load_triples_from_file(self, file_path: str) -> None:
         """
@@ -227,7 +243,11 @@ class SemanticMemory:
         
         # Compute embeddings for triples
         all_texts = [entry.text for entry in entries_to_index]
-        all_embeddings = self.embedding_model.encode_text(all_texts)
+        if self.vector_store is None:
+            all_embeddings = self.embedding_model.encode_text(all_texts)
+        else:
+            all_embeddings = np.asarray(self.vector_store.get_embeddings(
+                [self.vector_store.get_hash_id(text) for text in all_texts]))
         
         self.embeddings = torch.tensor(
             all_embeddings, 

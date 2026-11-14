@@ -1,6 +1,8 @@
 """Content identities shared by embedding indexes and derived retrieval views."""
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 
 
@@ -10,6 +12,15 @@ def canonical_json(value):
 
 def fingerprint(value):
     return hashlib.sha256(canonical_json(value).encode('utf-8')).hexdigest()
+
+
+def write_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+        json.dump(value, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
+    os.replace(stream.name, path)
 
 
 def index_fingerprint(embedding, inputs):

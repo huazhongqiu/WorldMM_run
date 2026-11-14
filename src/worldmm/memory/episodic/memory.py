@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from ...llm import LLMModel, PromptTemplateManager
 from ...embedding import EmbeddingModel
-from ...index_manifest import embedding_identity
+from ...index_manifest import embedding_identity, write_json
 
 from hipporag import HippoRAG
 from .utils import compute_mdhash_id
@@ -205,17 +205,29 @@ class EpisodicMemory:
         self.snapshot_root = Path(root)
         self.snapshot_load_only = load_only
 
-    def _snapshot_identity(self, until_time: int) -> Dict[str, Any]:
+    def base_openie_hash(self) -> str:
+        return hashlib.sha256(json.dumps(self.precomputed_openie, sort_keys=True).encode()).hexdigest()
+
+    def _snapshot_identity(self, until_time: int, *, version: int = 3) -> Dict[str, Any]:
         captions = {g: [(e.text, e.date, e.start_time, e.end_time) for e in entries
                         if e.timestamp_int[1] <= until_time]
                     for g, entries in self.captions.items()}
         payload = json.dumps(captions, sort_keys=True).encode()
-        openie_hash = hashlib.sha256(json.dumps(self.precomputed_openie, sort_keys=True).encode()).hexdigest()
         prepared = {}
-        if self.prepared_openie_dir:
+        if self.prepared_openie_dir and version == 2:
             prepared = {f.name: self._file_hash(f) for f in sorted(Path(self.prepared_openie_dir).glob("*.json"))}
-        return {"version": 2, "until_time": until_time, "prepared_openie": prepared,
-                "captions": hashlib.sha256(payload).hexdigest(), "base_openie": openie_hash,
+        elif self.prepared_openie_dir:
+            for g, entries in captions.items():
+                path = Path(self.prepared_openie_dir) / f"{g}.json"
+                if path.is_file():
+                    eligible = {compute_mdhash_id(text, prefix="chunk-") for text, *_ in entries}
+                    data = _load_json(str(path))
+                    docs = {doc["idx"]: doc for doc in data["docs"] if doc["idx"] in eligible}
+                    prepared[path.name] = hashlib.sha256(
+                        json.dumps({"provenance": data.get("provenance"), "docs": docs}, sort_keys=True).encode()
+                    ).hexdigest()
+        return {"version": version, "until_time": until_time, "prepared_openie": prepared,
+                "captions": hashlib.sha256(payload).hexdigest(), "base_openie": self.base_openie_hash(),
                 "embedding": embedding_identity(self.embedding_model) or self.embedding_model.text_model_name,
                 "llm": self.llm_model.model_name}
 
@@ -249,26 +261,32 @@ class EpisodicMemory:
         (temporary / "manifest.json").write_text(json.dumps(manifest, indent=2))
         temporary.rename(destination)
 
-    def _load_snapshot(self, until_time: int) -> None:
+    def _load_snapshot(self, until_time: int, *, for_update: bool = False) -> None:
         source = self.snapshot_root / str(until_time)
         manifest = _load_json(str(source / "manifest.json"))
-        if manifest["identity"] != self._snapshot_identity(until_time):
+        identity = manifest["identity"]
+        version = identity.get("version")
+        if version not in (2, 3) or identity != self._snapshot_identity(until_time, version=version):
             raise ValueError(f"Snapshot identity mismatch: {source}")
         for relative, checksum in manifest["files"].items():
             path = source / relative
             if not path.resolve().is_relative_to(source.resolve()) or self._file_hash(path) != checksum:
                 raise ValueError(f"Snapshot file mismatch: {path}")
-        # Each load has a private mutable working copy; persistent snapshots remain immutable.
-        Path(self.worker_cache_root).mkdir(parents=True, exist_ok=True)
-        destination = Path(tempfile.mkdtemp(prefix=f"snapshot-{until_time}-", dir=self.worker_cache_root))
         for g in manifest["granularities"]:
             if g not in self.granularities:
                 raise ValueError(f"Unknown snapshot granularity: {g}")
-            shutil.copytree(source / g, destination / g)
+        destination = source
+        if for_update:
+            Path(self.worker_cache_root).mkdir(parents=True, exist_ok=True)
+            destination = Path(tempfile.mkdtemp(prefix=f"snapshot-{until_time}-", dir=self.worker_cache_root))
+            for g in manifest["granularities"]:
+                shutil.copytree(source / g, destination / g)
         self.hipporag = {}
         self.save_dir_root = str(destination)
         for g in manifest["granularities"]:
             h = self._get_or_create_hipporag(g)
+            if not for_update:
+                h.read_only_index = True
             runtime = _load_json(str(destination / g / "snapshot_runtime.json"))
             h.node_to_node_stats = {(a, b): weight for a, b, weight in runtime["node_stats"]}
             h.ent_node_to_chunk_ids = {key: set(values) for key, values in runtime["entity_chunks"].items()}
@@ -278,6 +296,24 @@ class EpisodicMemory:
         self.indexed_entries = {g: [e for e in entries if e.timestamp_int[1] <= until_time]
                                 for g, entries in self.captions.items()}
         self.indexed_time = until_time
+
+    def upgrade_snapshot_identity(self, until_time: int, previous_openie_dir: str) -> None:
+        """Reidentify a version-two snapshot when its eligible OpenIE is unchanged."""
+        path = self.snapshot_root / str(until_time) / "manifest.json"
+        manifest = _load_json(str(path))
+        identity = manifest["identity"]
+        if identity.get("version") == 3:
+            return
+        target = self._snapshot_identity(until_time)
+        current = self.prepared_openie_dir
+        try:
+            self.prepared_openie_dir = previous_openie_dir
+            if identity != self._snapshot_identity(until_time, version=2) or self._snapshot_identity(until_time) != target:
+                raise ValueError(f"Cannot migrate incompatible snapshot: {path}")
+        finally:
+            self.prepared_openie_dir = current
+        manifest["identity"] = target
+        write_json(path, manifest)
 
     def _get_or_create_hipporag(self, granularity: str) -> HippoRAG:
         """Get or create HippoRAG instance for a granularity level."""

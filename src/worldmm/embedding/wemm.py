@@ -38,7 +38,10 @@ class WeMMEmbeddingModel:
     def _load_model(self):
         if self._model is None:
             from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(self.model_name, trust_remote_code=True, device=self.device)
+            self._model = SentenceTransformer(
+                self.model_name, trust_remote_code=True, device=self.device,
+                model_kwargs={"dtype": "auto"},
+            )
         return self._model
 
     def load_model(self, model_type=None):

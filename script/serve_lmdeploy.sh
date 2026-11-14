@@ -37,6 +37,13 @@ esac
 [[ "$MAX_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || fail "WORLDMM_LMDEPLOY_MAX_BATCH_SIZE must be a positive integer"
 
 echo "Starting Qwen3.5-4B profile=$PROFILE gpu=$GPU host=$HOST cache=$CACHE max_batch_size=$MAX_BATCH_SIZE" >&2
+SESSION_OPTIONS=()
+if [[ -n "${WORLDMM_LMDEPLOY_SESSION_LEN:-}" ]]; then
+  SESSION_OPTIONS+=(--session-len "$WORLDMM_LMDEPLOY_SESSION_LEN")
+fi
+if [[ "${WORLDMM_LMDEPLOY_EAGER:-0}" == 1 ]]; then
+  SESSION_OPTIONS+=(--eager-mode)
+fi
 exec env CUDA_VISIBLE_DEVICES="$GPU" "$LMDEPLOY" serve api_server "$MODEL" \
   --backend pytorch \
   --tp 1 \
@@ -45,6 +52,7 @@ exec env CUDA_VISIBLE_DEVICES="$GPU" "$LMDEPLOY" serve api_server "$MODEL" \
   --model-name Qwen3.5-4B \
   --max-batch-size "$MAX_BATCH_SIZE" \
   --cache-max-entry-count "$CACHE" \
+  "${SESSION_OPTIONS[@]}" \
   --trust-remote-code \
   --reasoning-parser default \
   --tool-call-parser qwen3coder \

@@ -46,7 +46,10 @@ def test_snapshot_roundtrip_isolated_and_rejects_changed_data(tmp_path, monkeypa
     assert [x.text for x in m.indexed_entries["30sec"]] == ["past"]
     assert m.hipporag["30sec"].ent_node_to_chunk_ids == {"a": {"past"}}
     assert m.hipporag["30sec"].node_to_node_stats == {("a", "b"): 2.0}
-    assert str(tmp_path / "snapshots") not in m.save_dir_root
+    assert m.hipporag["30sec"].read_only_index
+    assert Path(m.save_dir_root) == saved.parents[1]
+    m._load_snapshot(510003000, for_update=True)
+    assert Path(m.save_dir_root) != saved.parents[1]
     Path(m.save_dir_root, "30sec", "graph.pickle").write_bytes(b"worker mutation")
     assert saved.read_bytes() == b"test graph"
     with pytest.raises(FileNotFoundError):
@@ -66,6 +69,15 @@ def test_snapshot_corruption_rejected(tmp_path):
     m.configure_snapshots(str(tmp_path / "snapshots"), load_only=True)
     with pytest.raises(ValueError, match="mismatch"):
         m.index(1)
+
+
+def test_snapshot_identity_distinguishes_embedding_revisions(tmp_path):
+    m = memory(tmp_path)
+    m.embedding_model.index_identity = {"backend": "freeret", "weights": "first"}
+    before = m._snapshot_identity(1)
+    m.embedding_model.index_identity = {"backend": "freeret", "weights": "second"}
+    assert before["embedding"] == {"backend": "freeret", "weights": "first"}
+    assert before != m._snapshot_identity(1)
 
 
 def test_preparation_reuses_base_and_only_extracts_missing(tmp_path):
@@ -94,6 +106,11 @@ def test_preparation_reuses_base_and_only_extracts_missing(tmp_path):
 
 def test_snapshot_detects_corrupted_file_and_changed_prepared_openie(tmp_path):
     m = memory(tmp_path)
+    m.load_captions_from_data({"30sec": [
+        {"text": "past", "date": "DAY1", "start_time": "00000000", "end_time": "00000100"},
+    ]})
+    cutoff = 100000100
+    key = compute_mdhash_id("past", prefix="chunk-")
     m.prepared_openie_dir = str(tmp_path / "openie")
     Path(m.prepared_openie_dir).mkdir()
     prepared = Path(m.prepared_openie_dir) / "30sec.json"
@@ -103,16 +120,16 @@ def test_snapshot_detects_corrupted_file_and_changed_prepared_openie(tmp_path):
     folder.mkdir(parents=True)
     (folder / "graph.pickle").write_bytes(b"graph")
     m.hipporag["30sec"] = SimpleNamespace()
-    m.indexed_time = 1
-    m.save_snapshot(1)
+    m.indexed_time = cutoff
+    m.save_snapshot(cutoff)
     m.configure_snapshots(str(tmp_path / "snapshots"), load_only=True)
-    prepared.write_text('{"docs": [1]}')
+    prepared.write_text(json.dumps({"docs": [{"idx": key, "passage": "past"}]}))
     with pytest.raises(ValueError, match="identity mismatch"):
-        m.index(1)
+        m.index(cutoff)
     prepared.write_text('{"docs": []}')
-    (tmp_path / "snapshots" / "1" / "30sec" / "graph.pickle").write_bytes(b"corrupt")
+    (tmp_path / "snapshots" / str(cutoff) / "30sec" / "graph.pickle").write_bytes(b"corrupt")
     with pytest.raises(ValueError, match="file mismatch"):
-        m.index(1)
+        m.index(cutoff)
 
 
 def test_index_preparation_requires_complete_openie_before_gpu(tmp_path):
@@ -126,3 +143,24 @@ def test_index_preparation_requires_complete_openie_before_gpu(tmp_path):
     m.load_captions_from_data({"30sec": [{"text": "missing", "date": "DAY1", "start_time": "00000000", "end_time": "00000100"}]})
     with pytest.raises(ValueError, match="Incomplete OpenIE"):
         prepare_indexes(m, [100000100])
+
+
+def test_snapshot_identity_uses_visible_openie_content(tmp_path):
+    m = memory(tmp_path)
+    m.load_captions_from_data({"30sec": [
+        {"text": "past", "date": "DAY1", "start_time": "00000000", "end_time": "00000100"},
+        {"text": "future", "date": "DAY2", "start_time": "00000000", "end_time": "00000100"},
+    ]})
+    m.prepared_openie_dir = str(tmp_path / "openie")
+    path = Path(m.prepared_openie_dir) / "30sec.json"
+    path.parent.mkdir()
+    past = {"idx": compute_mdhash_id("past", prefix="chunk-"), "passage": "past",
+            "extracted_entities": ["Jake"], "extracted_triples": []}
+    path.write_text(json.dumps({"docs": [past]}))
+    identity = m._snapshot_identity(100000100)
+    future = {"idx": compute_mdhash_id("future", prefix="chunk-"), "passage": "future"}
+    path.write_text(json.dumps({"docs": [future, past]}, indent=4))
+    assert m._snapshot_identity(100000100) == identity
+    past["extracted_entities"] = ["Alice"]
+    path.write_text(json.dumps({"docs": [future, past]}, indent=4))
+    assert m._snapshot_identity(100000100) != identity

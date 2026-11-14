@@ -19,6 +19,14 @@ class SemanticConsolidation:
         self.llm_model = llm_model
         self.embedding_model = embedding_model
         self.similarity_threshold = 0.6  # Threshold for finding relevant existing triples
+        self.embedding_cache = {}
+
+    def _embed_triples(self, texts):
+        missing = list(dict.fromkeys(text for text in texts if text not in self.embedding_cache))
+        if missing:
+            vectors = self.embedding_model.encode(missing, modality="text", batch_size=4)
+            self.embedding_cache.update(zip(missing, vectors, strict=True))
+        return np.asarray([self.embedding_cache[text] for text in texts])
 
     def find_relevant_triples(self, new_triples: List[List[str]], 
                                 existing_triples: List[Tuple[List[str], List[str]]], 
@@ -42,8 +50,8 @@ class SemanticConsolidation:
         existing_triple_texts = [" ".join(triple) for triple, _ in existing_triples]
         
         # Get embeddings using text modality
-        new_embeddings = self.embedding_model.encode(new_triple_texts, modality="text")
-        existing_embeddings = self.embedding_model.encode(existing_triple_texts, modality="text")
+        new_embeddings = self._embed_triples(new_triple_texts)
+        existing_embeddings = self._embed_triples(existing_triple_texts)
         
         # Compute cosine similarity matrix (new_triples x existing_triples)
         similarities = cosine_similarity(new_embeddings, existing_embeddings)

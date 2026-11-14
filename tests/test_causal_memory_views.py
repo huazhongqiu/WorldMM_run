@@ -37,6 +37,16 @@ def test_shuffled_cutoffs_clear_future_and_empty_views():
     memory.index(109000000)
     assert memory.indexed_entries == [] and memory.embeddings is None
 
+
+def test_resolved_source_path_keeps_ego_visual_lookup_key():
+    memory = visual_module().VisualMemory()
+    memory.embedding_lookup = {"old.mp4": np.array([1., 0.])}
+    memory.load_clips_from_data([dict(date="DAY1", start_time="10000000",
+                                     end_time="10003000", video_path="old.mp4",
+                                     source_video_path="/mounted/old.mp4", start_sec=0, end_sec=30)])
+    memory.index(110003000)
+    assert [clip.video_path for clip in memory.indexed_entries] == ["/mounted/old.mp4"]
+
 def test_sparse_refuses_legacy_dense_only(monkeypatch):
     monkeypatch.setenv('WORLDMM_RETRIEVAL_SPARSE', '1')
     m = visual_module()

@@ -4,6 +4,7 @@ import os
 import tempfile
 import copy
 import shutil
+from itertools import chain
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from worldmm.memory.episodic.openie import OpenIE
@@ -13,13 +14,17 @@ from worldmm.memory.episodic.utils import compute_mdhash_id
 def configure_memory(memory, args):
     root = args.episodic_artifacts_dir
     metadata = Path(args.metadata_dir or "output/metadata")
-    candidates = list((metadata / "episodic_memory" / args.subject).glob("openie_results_*.json"))
+    candidates = ([Path(args.openie_file)] if getattr(args, "openie_file", None)
+                  else list((metadata / "episodic_memory" / args.subject).glob("openie_results_*.json")))
     if len(candidates) != 1:
         raise ValueError(f"Expected exactly one base OpenIE file: {candidates}")
     memory.load_precomputed_openie(str(candidates[0]), base_granularity="30sec", extract_coarse=True)
-    if root:
-        memory.prepared_openie_dir = str(Path(root) / "openie")
-        memory.configure_snapshots(str(Path(root) / "snapshots"), load_only=not args.prepare_index_only)
+    prepared = getattr(args, "prepared_openie_dir", None)
+    if prepared or root:
+        memory.prepared_openie_dir = prepared or str(Path(root) / "openie")
+    snapshots = getattr(args, "snapshot_dir", None)
+    if snapshots or root:
+        memory.configure_snapshots(snapshots or str(Path(root) / "snapshots"), load_only=not args.prepare_index_only)
         if args.prepare_index_only:
             Path(memory.worker_cache_root).mkdir(parents=True, exist_ok=True)
             memory.save_dir_root = tempfile.mkdtemp(prefix="build-", dir=memory.worker_cache_root)
@@ -83,7 +88,7 @@ def extract_caption(extractor, key, passage):
 def prepare_openie(memory, directory, until_time, extractor=None):
     directory = Path(directory)
     extractor = extractor or OpenIE(memory.llm_model)
-    provenance = {"llm": memory.llm_model.model_name, "base_openie": memory._snapshot_identity(until_time)["base_openie"]}
+    provenance = {"llm": memory.llm_model.model_name, "base_openie": memory.base_openie_hash()}
     for granularity, entries in memory.captions.items():
         passages = {compute_mdhash_id(e.text, prefix="chunk-"): e.text for e in entries
                     if e.timestamp_int[1] <= until_time}
@@ -102,7 +107,10 @@ def prepare_openie(memory, directory, until_time, extractor=None):
                                  "extracted_triples": base["triple_results"][key]}
         missing = [(key, text) for key, text in passages.items() if key not in docs]
         print(f"OpenIE {granularity}: reuse={len(passages)-len(missing)} missing={len(missing)}", flush=True)
-        write_json(path, {"provenance": provenance, "docs": list(docs.values())})
+        if not missing:
+            if previous["docs"] != list(docs.values()) or not path.exists():
+                write_json(path, {"provenance": provenance, "docs": list(docs.values())})
+            continue
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             for offset in range(0, len(missing), 16):
@@ -159,27 +167,41 @@ def reextract_hourly(memory, directory, extractor=None):
 def prepare_indexes(memory, times):
     # Validate all OpenIE coverage before loading an embedding model. No LLM calls in this phase.
     maximum = max(times)
+    expected_provenance = {"llm": memory.llm_model.model_name, "base_openie": memory.base_openie_hash()}
     for g, entries in memory.captions.items():
         expected = {compute_mdhash_id(e.text, prefix="chunk-") for e in entries if e.timestamp_int[1] <= maximum}
         if not expected:
             continue
         path = Path(memory.prepared_openie_dir) / f"{g}.json"
-        docs = {d["idx"] for d in json.loads(path.read_text())["docs"]}
-        for doc in json.loads(path.read_text())["docs"]:
+        prepared = json.loads(path.read_text())
+        docs = {d["idx"] for d in prepared["docs"]}
+        for doc in prepared["docs"]:
             if compute_mdhash_id(doc["passage"], prefix="chunk-") != doc["idx"]:
                 raise ValueError(f"OpenIE passage hash mismatch: {path}")
-        provenance = json.loads(path.read_text()).get("provenance")
-        if provenance != {"llm": memory.llm_model.model_name, "base_openie": memory._snapshot_identity(maximum)["base_openie"]}:
+        if prepared.get("provenance") != expected_provenance:
             raise ValueError(f"OpenIE provenance mismatch: {path}")
         if not expected <= docs:
             raise ValueError(f"Incomplete OpenIE: {path}; run --prepare-openie-only first")
     # A missing passage must be an error here, never an unexpected online model request.
     memory.require_precomputed_openie = True
-    for timestamp in sorted(set(times)):
+    ordered = sorted(set(times))
+    remaining = iter(ordered)
+    last_ready = None
+    for timestamp in remaining:
+        if not (memory.snapshot_root / str(timestamp) / "manifest.json").is_file():
+            break
+        last_ready = timestamp
+    else:
+        memory._load_snapshot(ordered[-1])
+        print(f"All {len(ordered)} snapshots already exist; latest read back at {ordered[-1]}", flush=True)
+        return
+    if last_ready is not None:
+        memory._load_snapshot(last_ready, for_update=True)
+        print(f"Snapshot resumed: {last_ready}", flush=True)
+    for timestamp in chain((timestamp,), remaining):
         destination = memory.snapshot_root / str(timestamp)
         if destination.exists():
-            # Resume from the last complete snapshot; its independent working copy can grow.
-            memory._load_snapshot(timestamp)
+            memory._load_snapshot(timestamp, for_update=True)
             print(f"Snapshot reused: {timestamp}", flush=True)
             continue
         memory.index(timestamp)

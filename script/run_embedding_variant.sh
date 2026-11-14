@@ -48,6 +48,17 @@ export WORLDMM_INDEX_ROOT="${WORLDMM_BACKEND_ROOT}/indexes"
 export WORLDMM_VIEW_ROOT="${WORLDMM_BACKEND_ROOT}/views"
 export WORLDMM_REPORT_ROOT="${WORLDMM_BACKEND_ROOT}/reports"
 export WORLDMM_RUN_ROOT="${WORLDMM_BACKEND_ROOT}/runs"
+if [[ -n "${WORLDMM_SMOKE_ROOT:-}" ]]; then
+  export WORLDMM_SHARED_ROOT="${WORLDMM_SMOKE_ROOT}/${DATASET}/shared"
+  export WORLDMM_CAPTION_ROOT="${WORLDMM_SHARED_ROOT}/captions"
+  export WORLDMM_EXTRACTION_ROOT="${WORLDMM_SHARED_ROOT}/extractions"
+  export WORLDMM_BACKEND_ROOT="${WORLDMM_SMOKE_ROOT}/${DATASET}/${BACKEND_LABEL}"
+  export WORLDMM_MEMORY_ROOT="${WORLDMM_BACKEND_ROOT}/memories"
+  export WORLDMM_INDEX_ROOT="${WORLDMM_BACKEND_ROOT}/indexes"
+  export WORLDMM_VIEW_ROOT="${WORLDMM_BACKEND_ROOT}/views"
+  export WORLDMM_REPORT_ROOT="${WORLDMM_BACKEND_ROOT}/reports"
+  export WORLDMM_RUN_ROOT="${WORLDMM_BACKEND_ROOT}/runs"
+fi
 export WORLDMM_OUTPUT_ROOT="${WORLDMM_OUTPUT_ROOT:-/myworkspace/projects/output/worldmm}/${DATASET}/${BACKEND_LABEL}"
 # This wrapper deliberately does not set sample, debug, limit, or query-days.
 # Consumer commands must explicitly bind the paths above to their CLI arguments.

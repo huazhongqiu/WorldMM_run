@@ -90,7 +90,7 @@ def test_failed_caption_does_not_discard_successful_caption_in_batch(tmp_path):
     from egolife_precompute import prepare_openie
     memory = SimpleNamespace(captions={"3min": [SimpleNamespace(text=text, timestamp_int=(0,1)) for text in ["bad", "good"]]},
                              llm_model=SimpleNamespace(model_name="llm"), base_granularity="30sec",
-                             _snapshot_identity=lambda t: {"base_openie": "hash"})
+                             base_openie_hash=lambda: "hash")
     class Extractor:
         def ner(self, key, text):
             return SimpleNamespace(unique_entities=["I"], metadata={})
@@ -119,7 +119,7 @@ def test_hourly_reextraction_covers_entire_week_without_reusing_legacy(tmp_path)
     from egolife_precompute import reextract_hourly
     entries = [SimpleNamespace(text=text, timestamp_int=(0,time)) for text,time in [("past",1),("future",200)]]
     memory = SimpleNamespace(captions={"1h": entries}, llm_model=SimpleNamespace(model_name="llm"),
-                             base_granularity="30sec", _snapshot_identity=lambda t: {"base_openie": "hash"})
+                             base_granularity="30sec", base_openie_hash=lambda: "hash")
     output=tmp_path / "openie"; output.mkdir()
     legacy={"provenance": {"llm":"llm","base_openie":"hash"},"docs":[{"idx":"old","passage":"past"}]}
     (output / "1h.json").write_text(json.dumps(legacy))
@@ -147,7 +147,7 @@ def test_incomplete_hourly_reextraction_keeps_original_active(tmp_path):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
     from egolife_precompute import reextract_hourly
     memory = SimpleNamespace(captions={"1h":[SimpleNamespace(text="bad",timestamp_int=(0,1))]},
-                             llm_model=SimpleNamespace(model_name="llm"),base_granularity="30sec",_snapshot_identity=lambda t:{"base_openie":"hash"})
+                             llm_model=SimpleNamespace(model_name="llm"),base_granularity="30sec",base_openie_hash=lambda:"hash")
     output=tmp_path / "openie";output.mkdir();(output/"1h.json").write_text("original")
     class Extractor:
         def ner(self,key,text):return SimpleNamespace(unique_entities=[],metadata={"error":"failed"})

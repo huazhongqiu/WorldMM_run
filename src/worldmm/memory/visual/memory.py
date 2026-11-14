@@ -244,19 +244,24 @@ class VisualMemory:
             # Get precomputed embedding if available (try clip_id, video_path, start_time)
             embedding = self.embedding_lookup.get(clip_id)
             if embedding is None:
+                embedding = self.embedding_lookup.get(entry.get("video_path", ""))
+            if embedding is None:
                 embedding = self.embedding_lookup.get(source_video_path)
             if embedding is None:
                 start_time_key = str(entry.get("start_time", ""))
                 embedding = self.embedding_lookup.get(start_time_key)
             
             clip_start_sec = entry.get("start_sec")
+            local_clip_file = self.dataset == "egolife" and "source_video_path" not in entry
             if self.video_root and video_path and not os.path.isabs(video_path):
                 relative_path = video_path.removeprefix("data/EgoLife/")
                 video_path = os.path.join(self.video_root, relative_path)
             clip_end_sec = entry.get("end_sec")
+            if clip_start_sec is None and local_clip_file:
+                clip_start_sec = 0.
             if clip_start_sec is None and entry.get("start_time"):
                 clip_start_sec = _time_str_to_seconds(str(entry["start_time"]))
-            if clip_end_sec is None and entry.get("end_time"):
+            if clip_end_sec is None and entry.get("end_time") and not local_clip_file:
                 clip_end_sec = _time_str_to_seconds(str(entry["end_time"]))
 
             record = embedding if isinstance(embedding, dict) else {}
@@ -532,8 +537,9 @@ class VisualMemory:
             # Convert to seconds relative to clip start
             # Timestamp format: DHHMMSS00 (day + HHMMSS + 00)
             # We need to calculate seconds from clip start
-            start_sec = self._timestamp_diff_seconds(clip_start, overlap_start)
-            end_sec = self._timestamp_diff_seconds(clip_start, overlap_end)
+            source_start = clip.clip_start_sec or 0.
+            start_sec = source_start + self._timestamp_diff_seconds(clip_start, overlap_start)
+            end_sec = source_start + self._timestamp_diff_seconds(clip_start, overlap_end)
             
             frames = self._extract_frames(
                 clip.video_path,

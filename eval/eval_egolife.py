@@ -464,6 +464,9 @@ def evaluate_parallel_egolife(
         memory.load_episodic_captions(caption_files=episodic_caption_files)
         configure_memory(memory.episodic_memory, args)
         memory.load_semantic_triples(data=semantic_results)
+        if args.visual_index_dir:
+            memory.semantic_memory.load_vector_store(
+                os.path.join(args.visual_index_dir, "semantic_memory", args.subject), args.semantic_file)
         memory.load_visual_clips(
             embeddings_path=visual_path,
             clips_data=episodic_captions_30sec,
@@ -640,6 +643,13 @@ def main():
     parser = argparse.ArgumentParser(description="EgoLifeQA Evaluation with WorldMM")
     parser.add_argument("--query-days", nargs="+", type=int, help="Select questions by query day, e.g. 5 6 7")
     parser.add_argument("--episodic-artifacts-dir", help="Persistent OpenIE and timestamp snapshot root")
+    parser.add_argument("--openie-file", help="Shared base OpenIE JSON")
+    parser.add_argument("--prepared-openie-dir", help="Shared multiscale OpenIE directory")
+    parser.add_argument("--snapshot-dir", help="Backend-specific causal episodic views")
+    parser.add_argument("--visual-index-dir", help="Backend-specific visual index root")
+    parser.add_argument("--visual-clips-file", help="Visual clip manifest for an isolated sample run")
+    parser.add_argument("--eval-json", help="Frozen question rows")
+    parser.add_argument("--require-complete", action="store_true", help="Fail if a question has no valid choice")
     preparation = parser.add_mutually_exclusive_group()
     preparation.add_argument("--prepare-openie-only", action="store_true")
     preparation.add_argument("--prepare-index-only", action="store_true")
@@ -665,8 +675,10 @@ def main():
     parser.add_argument("--limit", type=int, default=None, help="Maximum questions; use only for smoke")
     args = parser.parse_args()
     configure_console_logging()
-    if (args.prepare_openie_only or args.prepare_index_only or args.reextract_hourly_openie) and not args.episodic_artifacts_dir:
-        parser.error("Preparation requires --episodic-artifacts-dir")
+    if (args.prepare_openie_only or args.reextract_hourly_openie) and not (args.episodic_artifacts_dir or args.prepared_openie_dir):
+        parser.error("OpenIE preparation requires an OpenIE directory")
+    if args.prepare_index_only and not (args.episodic_artifacts_dir or (args.snapshot_dir and args.prepared_openie_dir)):
+        parser.error("Index preparation requires OpenIE and snapshot directories")
     if args.workers == 1 and args.cache_dir:
         os.makedirs(args.cache_dir, exist_ok=True)
 
@@ -709,7 +721,7 @@ def main():
     subject = args.subject
     data_dir = args.data_dir
     
-    eval_data_path = os.path.join(data_dir, f"EgoLifeQA/EgoLifeQA_{subject}.json")
+    eval_data_path = args.eval_json or os.path.join(data_dir, f"EgoLifeQA/EgoLifeQA_{subject}.json")
     eval_data = load_json(eval_data_path)
     if args.query_days:
         eval_data = [row for row in eval_data if int(row["query_time"]["date"].upper().replace("DAY", "")) in args.query_days]
@@ -740,20 +752,22 @@ def main():
     world_memory.load_episodic_captions(caption_files=episodic_caption_files)
     configure_memory(world_memory.episodic_memory, args)
     if args.reextract_hourly_openie:
-        reextract_hourly(world_memory.episodic_memory, Path(args.episodic_artifacts_dir) / "openie")
+        reextract_hourly(world_memory.episodic_memory, Path(world_memory.episodic_memory.prepared_openie_dir))
         return
     if args.prepare_openie_only:
-        prepare_openie(world_memory.episodic_memory, Path(args.episodic_artifacts_dir) / "openie", max(_query_time(r) for r in eval_data))
+        prepare_openie(world_memory.episodic_memory, Path(world_memory.episodic_memory.prepared_openie_dir), max(_query_time(r) for r in eval_data))
         return
     if args.prepare_index_only:
         prepare_indexes(world_memory.episodic_memory, [_query_time(r) for r in eval_data])
         return
     # Validate all requested snapshots before starting evaluation or worker GPU loads.
-    if args.episodic_artifacts_dir:
+    if args.snapshot_dir or args.episodic_artifacts_dir:
         episodic = world_memory.episodic_memory
         for timestamp in sorted({_query_time(r) for r in eval_data}):
             manifest = load_json(str(episodic.snapshot_root / str(timestamp) / "manifest.json"))
-            if manifest["identity"] != episodic._snapshot_identity(timestamp):
+            identity = manifest["identity"]
+            version = identity.get("version")
+            if version not in (2, 3) or identity != episodic._snapshot_identity(timestamp, version=version):
                 raise ValueError(f"Snapshot identity mismatch: {timestamp}")
 
     # Load semantic results
@@ -762,10 +776,12 @@ def main():
     if len(semantic_candidates) != 1:
         raise FileNotFoundError(f"Expected exactly one semantic consolidation file, found: {semantic_candidates}")
     semantic_path = semantic_candidates[0]
+    args.semantic_file = semantic_path
     semantic_results = load_json(semantic_path)
     
     # Load visual embeddings
-    visual_path = os.path.join(metadata_dir, f"visual_memory/{subject}/visual_embeddings.pkl")
+    visual_path = os.path.join(args.visual_index_dir or metadata_dir, f"visual_memory/{subject}/visual_embeddings.pkl")
+    visual_clips = load_json(args.visual_clips_file) if args.visual_clips_file else episodic_captions_30sec
 
     if args.video_root:
         os.environ["WORLDMM_VIDEO_ROOT"] = args.video_root
@@ -774,9 +790,11 @@ def main():
         logger.info("Starting %s question(s) with %s independent workers", len(eval_data), args.workers)
         results = evaluate_parallel_egolife(
             eval_data, args, embedding_model, episodic_caption_files,
-            semantic_results, visual_path, episodic_captions_30sec,
+            semantic_results, visual_path, visual_clips,
         )
         write_parallel_outputs(args, results)
+        if args.require_complete and any(not r["completed"] or not extract_choice_letter(r["response"]) for r in results):
+            raise SystemExit(2)
         return
     
     # Load data into WorldMemory
@@ -787,9 +805,12 @@ def main():
     
     # Load semantic triples
     world_memory.load_semantic_triples(data=semantic_results)
+    if args.visual_index_dir:
+        world_memory.semantic_memory.load_vector_store(
+            os.path.join(args.visual_index_dir, "semantic_memory", subject), semantic_path)
     
     # Load visual embeddings
-    world_memory.load_visual_clips(embeddings_path=visual_path, clips_data=episodic_captions_30sec)
+    world_memory.load_visual_clips(embeddings_path=visual_path, clips_data=visual_clips)
 
     # Evaluation loop
     logger.info(f"Starting evaluation on {len(eval_data)} samples...")
@@ -892,6 +913,8 @@ def main():
     logger.info(f"Evaluation Complete")
     logger.info(f"Subject: {subject}")
     logger.info(f"Total: {len(results)}")
+    if args.require_complete and any(not r["completed"] or not extract_choice_letter(r["response"]) for r in results):
+        raise SystemExit(2)
     logger.info(f"Correct: {evaluate_true}")
     logger.info(f"Accuracy: {final_accuracy:.4f}")
     logger.info(f"Results saved to: {output_path}")

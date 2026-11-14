@@ -853,6 +853,8 @@ class HippoRAG:
         actual_node_count = self.graph.vcount()
         
         if expected_node_count != actual_node_count:
+            if getattr(self, "read_only_index", False):
+                raise ValueError(f"Incomplete persisted graph: {self.working_dir}")
             logger.warning(f"Graph node count mismatch: expected {expected_node_count}, got {actual_node_count}")
             # If the graph is empty but we have nodes, we need to add them
             if actual_node_count == 0 and expected_node_count > 0:
@@ -870,6 +872,8 @@ class HippoRAG:
             missing_passage_nodes = [node_key for node_key in self.passage_node_keys if node_key not in igraph_name_to_idx]
             
             if missing_entity_nodes or missing_passage_nodes:
+                if getattr(self, "read_only_index", False):
+                    raise ValueError(f"Missing nodes in persisted graph: {self.working_dir}")
                 logger.warning(f"Missing nodes in graph: {len(missing_entity_nodes)} entity nodes, {len(missing_passage_nodes)} passage nodes")
                 # If nodes are missing, rebuild the graph
                 self.add_new_nodes()
@@ -881,6 +885,8 @@ class HippoRAG:
             self.entity_node_idxs = [igraph_name_to_idx[node_key] for node_key in self.entity_node_keys] # a list of backbone graph node index
             self.passage_node_idxs = [igraph_name_to_idx[node_key] for node_key in self.passage_node_keys] # a list of backbone passage node index
         except Exception as e:
+            if getattr(self, "read_only_index", False):
+                raise
             logger.error(f"Error creating node index mapping: {str(e)}")
             # Initialize with empty lists if mapping fails
             self.node_name_to_vertex_idx = {}

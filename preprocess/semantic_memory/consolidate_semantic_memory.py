@@ -7,6 +7,7 @@ Loads semantic extraction results and applies semantic consolidation.
 import argparse
 import json
 import os
+from pathlib import Path
 from typing import Dict, Any
 from tqdm import tqdm
 
@@ -56,11 +57,21 @@ def run_semantic_consolidation(semantic_file: str, output_dir: str, model_name: 
 
     timestamps = sorted(semantic_results.get('semantic_triples', {}).keys())
 
-    accumulated_semantic_triples = []
-    accumulated_episodic_evidence = []
-    timestamped_results = {}
+    from worldmm.index_manifest import write_json
 
-    for i, timestamp in tqdm(enumerate(timestamps), total=len(timestamps)):
+    output_file = Path(output_dir) / f"semantic_consolidation_results_{model_name}.json"
+    checkpoint = output_file.with_name(f".{output_file.stem}.checkpoint.json")
+    timestamped_results = load_semantic_extraction_results(checkpoint) if checkpoint.exists() else {}
+    if list(timestamped_results) != timestamps[:len(timestamped_results)]:
+        raise ValueError(f"Invalid semantic consolidation checkpoint: {checkpoint}")
+    accumulated_semantic_triples = (
+        timestamped_results[next(reversed(timestamped_results))]["consolidated_semantic_triples"]
+        if timestamped_results else []
+    )
+    accumulated_episodic_evidence = [[] for _ in accumulated_semantic_triples]
+
+    completed = len(timestamped_results)
+    for i, timestamp in tqdm(enumerate(timestamps[completed:], start=completed), total=len(timestamps), initial=completed):
         logger.info(f"Processing timestamp {timestamp} ({i+1}/{len(timestamps)})")
 
         current_triples = semantic_results['semantic_triples'].get(timestamp, [])
@@ -103,6 +114,8 @@ def run_semantic_consolidation(semantic_file: str, output_dir: str, model_name: 
         timestamped_results[timestamp] = {
             "consolidated_semantic_triples": accumulated_semantic_triples,
         }
+        if (i + 1) % 10 == 0:
+            write_json(checkpoint, timestamped_results)
 
     total_triples_after = len(accumulated_semantic_triples)
     logger.info(f"Total semantic triples after consolidation: {total_triples_after}")
@@ -110,9 +123,7 @@ def run_semantic_consolidation(semantic_file: str, output_dir: str, model_name: 
         logger.info(f"Reduction in triples: {total_triples_before - total_triples_after} "
                      f"({((total_triples_before - total_triples_after) / total_triples_before * 100):.1f}%)")
 
-    output_file = os.path.join(output_dir, f"semantic_consolidation_results_{model_name}.json")
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(timestamped_results, f, indent=2, ensure_ascii=False)
+    write_json(output_file, timestamped_results)
 
     logger.info(f"Results have been saved to: {output_file}")
 

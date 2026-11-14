@@ -1,6 +1,7 @@
 import numpy as np
 from tqdm import tqdm
 import os
+import tempfile
 from typing import Union, Optional, List, Dict, Set, Any, Tuple, Literal
 import logging
 from copy import deepcopy
@@ -118,7 +119,9 @@ class EmbeddingStore:
             "content": self.texts,
             "embedding": self.embeddings
         })
-        data_to_save.to_parquet(self.filename, index=False)
+        with tempfile.NamedTemporaryFile(dir=os.path.dirname(self.filename), delete=False) as stream:
+            data_to_save.to_parquet(stream, index=False)
+        os.replace(stream.name, self.filename)
         self.hash_id_to_row = {h: {"hash_id": h, "content": t} for h, t, e in zip(self.hash_ids, self.texts, self.embeddings)}
         self.hash_id_to_idx = {h: idx for idx, h in enumerate(self.hash_ids)}
         self.hash_id_to_text = {h: self.texts[idx] for idx, h in enumerate(self.hash_ids)}

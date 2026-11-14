@@ -209,6 +209,9 @@ def main() -> int:
     parser.add_argument("--output-dir", type=str, default="output", help="Output directory for results")
     parser.add_argument("--duration", type=str, default=None, choices=["short", "medium", "long"], help="Optionally filter by video duration")
     parser.add_argument("--episodic-cache-dir", type=str, default=".cache/videomme", help="Root cache directory for per-video episodic HippoRAG state.")
+    parser.add_argument("--extraction-dir", help="Shared OpenIE root")
+    parser.add_argument("--index-dir", help="Backend-specific visual and semantic index root")
+    parser.add_argument("--view-dir", help="Backend-specific prepared episodic snapshots")
     parser.add_argument("--eval-name", type=str, default="videomme", help="Dataset name used in the output filename.")
     parser.add_argument("--records-jsonl", type=str, default=None, help="Append-only per-question checkpoint file.")
     parser.add_argument("--require-complete", action="store_true", help="Exit non-zero if any question is error/missing.")
@@ -269,6 +272,10 @@ def main() -> int:
 
         world_memory.reset()
         world_memory.episodic_memory.save_dir_root = get_episodic_cache_root( args.episodic_cache_dir, video_id)
+        if args.view_dir:
+            world_memory.episodic_memory.worker_cache_root = os.path.join(args.output_dir, "cache", str(video_id))
+            world_memory.episodic_memory.configure_snapshots(
+                os.path.join(args.view_dir, str(video_id), "snapshots"), load_only=True)
 
         caption_dir = os.path.join(args.caption_dir, str(video_id))
         caption_files = {}
@@ -292,7 +299,7 @@ def main() -> int:
         world_memory.load_episodic_captions(caption_files=caption_files)
 
         episodic_openie_file = os.path.join(
-            args.metadata_dir, "episodic_memory", str(video_id),
+            args.extraction_dir or args.metadata_dir, "episodic_memory", str(video_id),
             f"openie_results_{model_name}.json",
         )
         try:
@@ -313,9 +320,12 @@ def main() -> int:
         )
         if os.path.exists(semantic_file):
             world_memory.load_semantic_triples(file_path=semantic_file)
+            if args.index_dir:
+                world_memory.semantic_memory.load_vector_store(
+                    os.path.join(args.index_dir, "semantic_memory", str(video_id)), semantic_file)
 
         visual_pkl = os.path.join(
-            args.metadata_dir, "visual_memory", str(video_id),
+            args.index_dir or args.metadata_dir, "visual_memory", str(video_id),
             "visual_embeddings.pkl",
         )
         base_caption_file = caption_files.get("10sec")

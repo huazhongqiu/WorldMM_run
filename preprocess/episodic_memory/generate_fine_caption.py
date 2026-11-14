@@ -320,13 +320,20 @@ def generate_caption(segment: Segment, video_reader_ctx: VideoReaderContext, mod
         release_frames(frames)
 
 
-def build_caption_entry(segment: Segment, video_path: Path, caption_text: str) -> dict[str, str]:
+def build_caption_entry(segment: Segment, video_path: Path, caption_text: str) -> dict[str, Any]:
     return {
         "start_time": format_caption_time(segment.start_seconds, round_up=False),
         "end_time": format_caption_time(segment.end_seconds, round_up=True),
         "text": caption_text,
         "date": "DAY1",
         "video_path": video_path.as_posix(),
+        "start_sec": segment.start_seconds,
+        "end_sec": segment.end_seconds,
+        "subtitles": [
+            {"start_time": max(segment.start_seconds, entry.start_seconds),
+             "end_time": min(segment.end_seconds, entry.end_seconds), "subtitle": entry.text}
+            for entry in segment.transcripts
+        ],
     }
 
 
@@ -340,12 +347,13 @@ def release_frames(frames: list[FrameSample]) -> None:
 
 def process_video(
     video_file: Path,
-    transcript_file: Path,
+    transcript_file: Path | None,
     output_file: Path,
     model: LLMModel,
     unit_time: int,
+    max_segments: int | None = None,
 ) -> int:
-    transcript_entries = parse_transcript(transcript_file)
+    transcript_entries = parse_transcript(transcript_file) if transcript_file else []
     video_reader = VideoReader(str(video_file), ctx=cpu(0))
     duration, average_fps = get_video_duration(video_reader)
     video_reader_ctx = VideoReaderContext(
@@ -354,11 +362,11 @@ def process_video(
         total_frames=len(video_reader),
         lock=Lock(),
     )
-    segments = build_segments(duration, transcript_entries, unit_time)
+    segments = build_segments(duration, transcript_entries, unit_time)[:max_segments]
 
     results: list[tuple[int, str]] = []
     generation_errors: list[str] = []
-    max_workers = min(64, os.cpu_count() or 1, len(segments)) if segments else 1
+    max_workers = min(int(os.environ.get("WORLDMM_CAPTION_WORKERS", "64")), os.cpu_count() or 1, len(segments))
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_idx = {
@@ -391,9 +399,9 @@ def process_video(
         for idx, caption_text in ordered_results
     ]
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    with output_file.open("w", encoding="utf-8") as f:
-        json.dump(caption_entries, f, indent=2, ensure_ascii=False)
+    from worldmm.index_manifest import write_json
+
+    write_json(output_file, caption_entries)
 
     return len(caption_entries)
 
