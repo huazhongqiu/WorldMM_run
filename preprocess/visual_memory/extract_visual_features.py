@@ -37,6 +37,14 @@ def load_video_paths(json_path: str) -> List[str]:
     return video_paths
 
 
+def _encode_visual_record(embedding_model, content, **kwargs):
+    """One FreeRet forward persists the complete representation for every profile."""
+    if getattr(embedding_model, 'backend', 'original') == 'freeret':
+        _ = embedding_model.index_identity
+        return embedding_model.encode_representations(content, modality='video', **kwargs)[0]
+    return embedding_model.encode_video(content, **kwargs)[0]
+
+
 def process_videos_sequentially(video_paths: List[str], embedding_model: EmbeddingModel, 
                                 num_frames: int = 16) -> Dict[str, np.ndarray]:
     """Process videos sequentially (one at a time) and extract embeddings."""
@@ -51,14 +59,14 @@ def process_videos_sequentially(video_paths: List[str], embedding_model: Embeddi
         
         try:
             # Extract embedding for single video
-            embedding = embedding_model.encode_video(
+            embedding = _encode_visual_record(embedding_model,
                 [path], 
                 num_frames=num_frames,
                 batch_size=1
             )
             
             # Store embedding in dictionary (keep as numpy array for pickle)
-            embeddings_dict[path] = embedding[0]
+            embeddings_dict[path] = embedding
             
         except Exception as e:
             print(f"Error processing video {path}: {str(e)}")
@@ -110,14 +118,8 @@ def merge_split_embeddings(person: str, num_splits: int):
         save_embeddings(merged_embeddings, output_file)
         print(f"Successfully merged {len(merged_embeddings)} total embeddings")
         
-        # Optionally remove split files after successful merge
-        print("\nRemoving split files...")
-        for split_id in range(num_splits):
-            split_file = f"output/metadata/visual_memory/{person}/visual_embeddings_split_{split_id}.pkl"
-            if os.path.exists(split_file):
-                os.remove(split_file)
-                print(f"Removed {split_file}")
-        
+        # Keep split artifacts for audit and safe recovery.
+
         return True
         
     except Exception as e:
@@ -202,10 +204,14 @@ def process_caption_dir(
 
             video_spec = {"video": vp, "video_start": start_sec, "video_end": end_sec}
             try:
-                embedding = embedding_model.encode_video(
-                    [video_spec], nframes=clip_nframes, batch_size=1,
+                options = {}
+                if embedding_model.backend == 'freeret' and 'subtitles' in entry:
+                    options['subtitles'] = [item for item in entry['subtitles']
+                                            if start_sec <= item['start_time'] < item['end_time'] <= end_sec]
+                embedding = _encode_visual_record(embedding_model,
+                    [video_spec], nframes=clip_nframes, batch_size=1, **options,
                 )
-                embeddings_dict[key] = embedding[0]
+                embeddings_dict[key] = embedding
             except Exception as e:
                 print(f"  Error encoding {video_id} segment {start_time}-{end_time}: {e}")
 

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from ...llm import LLMModel, PromptTemplateManager
 from ...embedding import EmbeddingModel
+from ...index_manifest import embedding_identity
 
 from hipporag import HippoRAG
 from .utils import compute_mdhash_id
@@ -215,7 +216,7 @@ class EpisodicMemory:
             prepared = {f.name: self._file_hash(f) for f in sorted(Path(self.prepared_openie_dir).glob("*.json"))}
         return {"version": 2, "until_time": until_time, "prepared_openie": prepared,
                 "captions": hashlib.sha256(payload).hexdigest(), "base_openie": openie_hash,
-                "embedding": self.embedding_model.text_model_name,
+                "embedding": embedding_identity(self.embedding_model) or self.embedding_model.text_model_name,
                 "llm": self.llm_model.model_name}
 
     @staticmethod

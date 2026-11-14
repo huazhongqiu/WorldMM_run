@@ -13,6 +13,7 @@ import re
 
 from worldmm.llm import LLMModel, PromptTemplateManager
 from worldmm.embedding import EmbeddingModel
+from worldmm.index_manifest import embedding_identity, ensure_manifest, fingerprint
 from worldmm.memory.episodic.openie import OpenIE
 from worldmm.memory.episodic.utils import NerOutput, TripleOutput
 
@@ -89,10 +90,18 @@ class HippoRAG:
         _print_config = ",\n  ".join([f"{k} = {v}" for k, v in asdict(self.global_config).items()])
         logger.debug(f"HippoRAG init with config:\n  {_print_config}\n")
 
+        self.embedding_model = embedding_model if embedding_model is not None else EmbeddingModel(
+            text_model_name=self.global_config.embedding_model_name)
+        encoder_identity = embedding_identity(self.embedding_model)
+
         #LLM and embedding model specific working directories are created under every specified saving directories
         llm_label = self.global_config.llm_name.replace("/", "_")
         embedding_label = self.global_config.embedding_model_name.replace("/", "_")
         self.working_dir = os.path.join(self.global_config.save_dir, f"{llm_label}_{embedding_label}")
+
+        if encoder_identity is not None:
+            self.working_dir = os.path.join(self.working_dir, fingerprint(encoder_identity))
+            ensure_manifest(self.working_dir, {"embedding": encoder_identity})
 
         if not os.path.exists(self.working_dir):
             logger.info(f"Creating working directory: {self.working_dir}")
@@ -109,10 +118,6 @@ class HippoRAG:
 
         self.graph = self.initialize_graph()
 
-        if embedding_model is None:
-            self.embedding_model = EmbeddingModel(text_model_name=self.global_config.embedding_model_name)
-        else:
-            self.embedding_model = embedding_model
         
         self.chunk_embedding_store = EmbeddingStore(self.embedding_model,
                                                     os.path.join(self.working_dir, "chunk_embeddings"),
@@ -953,12 +958,12 @@ class HippoRAG:
         if len(all_query_strings) > 0:
             # get all query embeddings
             logger.info(f"Encoding {len(all_query_strings)} queries for query_to_fact.")
-            query_embeddings_for_triple = self.embedding_model.encode(all_query_strings, batch_size=self.global_config.embedding_batch_size)
+            query_embeddings_for_triple = getattr(self.embedding_model, "encode_text_query", self.embedding_model.encode)(all_query_strings, batch_size=self.global_config.embedding_batch_size)
             for query, embedding in zip(all_query_strings, query_embeddings_for_triple):
                 self.query_to_embedding['triple'][query] = embedding
 
             logger.info(f"Encoding {len(all_query_strings)} queries for query_to_passage.")
-            query_embeddings_for_passage = self.embedding_model.encode(all_query_strings, batch_size=self.global_config.embedding_batch_size)
+            query_embeddings_for_passage = getattr(self.embedding_model, "encode_text_query", self.embedding_model.encode)(all_query_strings, batch_size=self.global_config.embedding_batch_size)
             for query, embedding in zip(all_query_strings, query_embeddings_for_passage):
                 self.query_to_embedding['passage'][query] = embedding
 
@@ -984,7 +989,7 @@ class HippoRAG:
         """
         query_embedding = self.query_to_embedding['triple'].get(query, None)
         if query_embedding is None:
-            query_embedding = self.embedding_model.encode(query, batch_size=self.global_config.embedding_batch_size)
+            query_embedding = getattr(self.embedding_model, "encode_text_query", self.embedding_model.encode)(query, batch_size=self.global_config.embedding_batch_size)
 
         # Check if there are any facts
         if len(self.fact_embeddings) == 0:
@@ -1026,7 +1031,7 @@ class HippoRAG:
         """
         query_embedding = self.query_to_embedding['passage'].get(query, None)
         if query_embedding is None:
-            query_embedding = self.embedding_model.encode(query, batch_size=self.global_config.embedding_batch_size)
+            query_embedding = getattr(self.embedding_model, "encode_text_query", self.embedding_model.encode)(query, batch_size=self.global_config.embedding_batch_size)
         query_doc_scores = np.dot(self.passage_embeddings, query_embedding.T)
         query_doc_scores = np.squeeze(query_doc_scores) if query_doc_scores.ndim == 2 else query_doc_scores
         query_doc_scores = min_max_normalize(query_doc_scores)

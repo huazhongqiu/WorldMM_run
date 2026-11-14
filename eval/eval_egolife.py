@@ -378,6 +378,14 @@ class SynchronizedEmbeddingModel:
         with self._lock:
             return self._model.encode_text(*args, **kwargs)
 
+    def encode_text_query(self, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return self._model.encode_text_query(*args, **kwargs)
+
+    def encode_representations(self, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return self._model.encode_representations(*args, **kwargs)
+
     def encode_vis_query(self, *args: Any, **kwargs: Any) -> Any:
         with self._lock:
             return self._model.encode_vis_query(*args, **kwargs)

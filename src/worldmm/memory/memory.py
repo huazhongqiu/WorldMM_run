@@ -99,7 +99,8 @@ class WorldMemory:
         # Retrieval configuration
         self.episodic_top_k: int = 3
         self.semantic_top_k: int = 10
-        self.visual_top_k: int = 3
+        visual_options = self.visual_memory.retrieval_config.get('options', {})
+        self.visual_top_k: int = visual_options.get('top_k') or 3
         
     def load_episodic_captions(
         self,
@@ -174,7 +175,11 @@ class WorldMemory:
         Args:
             until_time: Timestamp in integer format (day + time.zfill(8))
         """
-        if self.indexed_time >= until_time:
+        if until_time < self.indexed_time:
+            if not getattr(self.episodic_memory, 'snapshot_load_only', False):
+                raise ValueError('Earlier queries require a causal snapshot or a fresh episodic cache')
+            self.reset_index()
+        if self.indexed_time == until_time:
             logger.debug(f"Already indexed up to {self.indexed_time}, skipping")
             return
         
@@ -407,6 +412,7 @@ Retrieved:
         result = self.visual_memory.retrieve(
             query=query,
             top_k=top_k,
+            fps=self.visual_memory.retrieval_config.get('options', {}).get('sample_fps', 1.0),
             as_context=True,
         )
         
@@ -452,11 +458,13 @@ Retrieved:
 
 
         # Index if needed
-        if until_time and until_time > self.indexed_time:
+        if until_time is not None and until_time != self.indexed_time:
             emit_progress("index_start", until_time=until_time)
             self.index(until_time, progress_callback=progress_callback)
             emit_progress("index_complete", until_time=until_time)
         
+        self.visual_memory.set_retrieval_context(query, query_time=until_time if until_time is not None else self.indexed_time)
+
         # Format query with choices if provided
         full_query = f"Query: {query}"
         if choices:

@@ -271,7 +271,7 @@ class SemanticMemory:
         device = self.embeddings.device
         
         # Encode query
-        query_embedding = self.embedding_model.encode_text(query)
+        query_embedding = getattr(self.embedding_model, "encode_text_query", self.embedding_model.encode_text)(query)
         if len(query_embedding.shape) == 1:
             query_embedding = query_embedding.reshape(1, -1)
         query_tensor = torch.tensor(query_embedding, dtype=torch.float32, device=device)

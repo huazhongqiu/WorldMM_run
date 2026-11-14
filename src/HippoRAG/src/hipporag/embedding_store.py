@@ -5,6 +5,7 @@ from typing import Union, Optional, List, Dict, Set, Any, Tuple, Literal
 import logging
 from copy import deepcopy
 import pandas as pd
+from worldmm.index_manifest import embedding_identity, ensure_manifest
 
 from .utils.misc_utils import compute_mdhash_id
 
@@ -31,6 +32,10 @@ class EmbeddingStore:
         self.embedding_model = embedding_model
         self.batch_size = batch_size
         self.namespace = namespace
+
+        identity = embedding_identity(embedding_model)
+        if identity is not None:
+            ensure_manifest(db_filename, {"embedding": identity, "namespace": namespace})
 
         if not os.path.exists(db_filename):
             logger.info(f"Creating working directory: {db_filename}")

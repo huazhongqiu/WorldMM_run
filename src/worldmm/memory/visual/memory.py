@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from PIL import Image
 
 from ...embedding import EmbeddingModel
+from .retrieval_scoring import (CALIBRATION_QUERIES, retrieval_config, dense_scores, bm25_sets, minmax, rerank_scores, select_indices, wall_seconds)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,9 @@ class VideoClipEntry:
     clip_end_sec: Optional[float] = None
     embedding: Optional[np.ndarray] = None  # Precomputed embedding
     
+    token_ids: Optional[List[int]] = None
+    subtitle: Optional[str] = None
+
     @property
     def timestamp_int(self) -> Tuple[int, int]:
         """Convert start and end times to integer format (day + time.zfill(8))."""
@@ -176,7 +180,19 @@ class VisualMemory:
         self.indexed_time: int = 0
         self.embeddings: Optional[torch.Tensor] = None
         self.index_to_pos: Dict[str, int] = {}
-    
+        self.retrieval_config, self.dataset = retrieval_config()
+        self.retrieval_context = {}
+        self._query_mean = None
+        self.last_score_trace = []
+
+    def set_retrieval_context(self, question: str, query_time=None, video_duration=None):
+        """Keep the original question's priors independent of agent search rewrites."""
+        self.retrieval_context = {'question': question}
+        if query_time is not None:
+            self.retrieval_context['query_time'] = query_time
+        if video_duration is not None:
+            self.retrieval_context['video_duration'] = video_duration
+
     def load_embeddings_from_file(self, embeddings_path: str) -> None:
         """
         Load precomputed video embeddings from a pickle file.
@@ -190,7 +206,14 @@ class VisualMemory:
             raise FileNotFoundError(f"Embeddings file not found: {embeddings_path}")
         
         with open(embeddings_path, 'rb') as f:
-            self.embedding_lookup = pickle.load(f)
+            lookup = pickle.load(f)
+        if getattr(self.embedding_model, 'backend', None) == 'freeret':
+            identity = self.embedding_model.index_identity
+            if not lookup or any(not isinstance(record, dict)
+                                 or record.get('metadata', {}).get('identity') != identity
+                                 for record in lookup.values()):
+                raise ValueError(f'FreeRet visual index identity mismatch: {embeddings_path}')
+        self.embedding_lookup = lookup
         
         logger.info(f"Loaded {len(self.embedding_lookup)} video embeddings from {embeddings_path}")
     
@@ -236,6 +259,12 @@ class VisualMemory:
             if clip_end_sec is None and entry.get("end_time"):
                 clip_end_sec = _time_str_to_seconds(str(entry["end_time"]))
 
+            record = embedding if isinstance(embedding, dict) else {}
+            if record:
+                embedding = np.asarray(record["dense"], dtype=np.float32)
+            subtitle = entry.get("subtitle")
+            if subtitle is None and "subtitles" in entry:
+                subtitle = " ".join(item.get("subtitle", "") for item in entry["subtitles"])
             clip_entry = VideoClipEntry(
                 id=clip_id,
                 video_path=video_path,
@@ -245,6 +274,8 @@ class VisualMemory:
                 clip_start_sec=clip_start_sec,
                 clip_end_sec=clip_end_sec,
                 embedding=embedding,
+                token_ids=record.get("token_ids"),
+                subtitle=subtitle,
             )
             self.clips.append(clip_entry)
             self.clip_id_to_entry[clip_id] = clip_entry
@@ -264,7 +295,7 @@ class VisualMemory:
             until_time: Timestamp boundary - index all clips with end_time <= this value
         """
         # Skip if already indexed beyond this time
-        if self.indexed_time >= until_time:
+        if self.indexed_time == until_time:
             logger.debug(f"Already indexed up to {self.indexed_time}, skipping index for {until_time}")
             return
         
@@ -275,6 +306,8 @@ class VisualMemory:
         ]
         
         if not entries_to_index:
+            self.reset_index()
+            self.indexed_time = until_time
             logger.debug(f"No entries to index up to {until_time}")
             return
         
@@ -322,6 +355,9 @@ class VisualMemory:
             For time range query: List of FrameEntry objects (or Dict if as_context=True)
             For text query: List of VideoClipEntry objects (or Dict if as_context=True)
         """
+        expected_fps = self.retrieval_config.get('options', {}).get('sample_fps')
+        if expected_fps is not None and fps != expected_fps:
+            raise ValueError(f'Frame fps={fps} conflicts with VideoSpy sample_fps={expected_fps}')
         # Check if query is a time range
         if _is_time_range_query(query):
             frames = self._retrieve_by_time_range(
@@ -375,27 +411,56 @@ class VisualMemory:
         if self.embedding_model is None:
             raise ValueError("embedding_model is required for similarity-based retrieval")
         
-        device = self.embeddings.device
-        
-        # Use visual query encoding for cross-modal retrieval
-        q_emb = self.embedding_model.encode_vis_query(query)
-        
-        # Ensure proper shape
-        if len(q_emb.shape) == 1:
-            q_emb = q_emb.reshape(1, -1)
-        
-        query_tensor = torch.tensor(q_emb, dtype=torch.float32, device=device)
-        
-        # Compute similarities
-        similarities = F.cosine_similarity(query_tensor, self.embeddings, dim=1)
-        
-        # Get top-k
-        num_available = len(self.indexed_entries)
-        k = min(top_k, num_available)
-        top_values, top_indices = torch.topk(similarities, k)
-        
-        results = [self.indexed_entries[idx] for idx in top_indices.cpu().tolist()]
-        
+        config = self.retrieval_config
+        if config['sparse']:
+            if any(c.token_ids is None for c in self.indexed_entries):
+                raise ValueError('Sparse retrieval requires stored token_ids; legacy dense-only index cannot enable S')
+            records = self.embedding_model.encode_representations(query, modality='vis_query')
+            q_emb = np.asarray(records[0]['dense']).reshape(1, -1)
+            query_tokens = records[0]['token_ids'][:config.get('options', {}).get('query_token_top_k',512)]
+        else:
+            q_emb = self.embedding_model.encode_vis_query(query)
+        options = config.get('options', {})
+        if not any(config[key] for key in ('center','sparse','rerank')):
+            # Preserve the original backend's scoring/top-k semantics.
+            query_tensor = torch.tensor(np.asarray(q_emb).reshape(1, -1), dtype=torch.float32, device=self.embeddings.device)
+            similarities = F.cosine_similarity(query_tensor, self.embeddings, dim=1)
+            _, indices = torch.topk(similarities, min(max(top_k, 0), len(self.indexed_entries)))
+            chosen = indices.cpu().tolist()
+        else:
+            if config['center'] and self._query_mean is None:
+                self._query_mean = np.mean(self.embedding_model.encode_vis_query(list(CALIBRATION_QUERIES)), axis=0)
+            vectors = self.embeddings.cpu().numpy()
+            raw, dense = dense_scores(q_emb, vectors, center=config['center'], query_mean=self._query_mean, visible_vectors=vectors)
+            sparse = bm25_sets(query_tokens, [c.token_ids[:options.get('clip_token_top_k',512)] for c in self.indexed_entries], options.get('bm25_k1',1.2),options.get('bm25_b',.75)) if config['sparse'] else np.zeros(len(vectors))
+            weight = options.get('dense_weight',.5)
+            normalized_dense = minmax(dense)
+            normalized_sparse = minmax(sparse)
+            scores = weight * normalized_dense + (1-weight) * normalized_sparse if config['sparse'] else dense.copy()
+            rows = []
+            for clip in self.indexed_entries:
+                a, b = clip.timestamp_int
+                rows.append(dict(start=wall_seconds(a) if self.dataset == 'egolife' else clip.clip_start_sec,
+                                 end=wall_seconds(b) if self.dataset == 'egolife' else clip.clip_end_sec,
+                                 subtitle=clip.subtitle))
+            retrieval_scores = scores.copy()
+            if config['rerank']:
+                if self.dataset == 'egolife' and any(c.subtitle is None for c in self.indexed_entries):
+                    raise ValueError('EgoLife R requires aligned subtitle metadata on every clip (empty subtitle is allowed)')
+                if not config['sparse']:
+                    scores = minmax(scores)
+                context = self.retrieval_context
+                now = context.get('query_time', self.indexed_time)
+                scores = rerank_scores(scores, rows, dataset=self.dataset, question=context.get('question', query),
+                    query_time=wall_seconds(now) if self.dataset == 'egolife' else None,
+                    duration=context.get('video_duration') or max((r['end'] for r in rows), default=0), options=options.get('rerank_options'))
+            chosen = select_indices(scores, top_k, dataset=self.dataset, rerank=config['rerank'], ends=[r['end'] for r in rows], temporal_nms=options.get('rerank_options',{}).get('temporal_nms',60.))
+            self.last_score_trace = [dict(clip_id=clip.id, raw_dense=float(raw[i]), dense=float(dense[i]),
+                normalized_dense=float(normalized_dense[i]), sparse=float(sparse[i]), normalized_sparse=float(normalized_sparse[i]), retrieval_score=float(retrieval_scores[i]), prior=float(scores[i]-retrieval_scores[i]), score=float(scores[i]), selected=i in chosen)
+                for i, clip in enumerate(self.indexed_entries)]
+            logger.debug('Visual C/S/R scores: %s', self.last_score_trace)
+        results = [self.indexed_entries[i] for i in chosen]
+
         if as_context:
             # Extract frames from all retrieved clips, organized by clip
             frames_by_clip: Dict[str, List[FrameEntry]] = {}
@@ -442,7 +507,7 @@ class VisualMemory:
         
         # Find all clips that overlap with the time range
         matching_clips = []
-        for clip in self.clips:
+        for clip in self.indexed_entries:
             clip_start, clip_end = clip.timestamp_int
             # Check if clip overlaps with the query time range
             if clip_start <= end_ts and clip_end >= start_ts:
