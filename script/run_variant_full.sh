@@ -7,6 +7,8 @@ run_id="${1:?run ID required}"
 [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || exit 2
 run_root="${WORLDMM_PIPELINE_ROOT:-/workspace/worldmm-embedding-bench/full}/$run_id"
 mkdir -p "$run_root"
+git rev-parse HEAD > "$run_root/code_commit"
+git status --porcelain > "$run_root/working_tree_status"
 exec 9>"$run_root/pipeline.lock"
 flock -n 9 || { echo "Run $run_id is already active" >&2; exit 2; }
 exec > >(tee -a "$run_root/pipeline.log") 2>&1

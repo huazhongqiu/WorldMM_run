@@ -39,6 +39,19 @@ Video-MME. Use `--smoke-questions 4` for EgoLife. Formal QA uses the frozen ques
 manifest. FreeRet profiles Base, C, S, R, CS, CR, SR and CSR use the same indexes.
 Video-MME supports Base, C, S and CS.
 
+Episodic memory uses the dataset-specific configurations in the WorldMM paper's
+implementation details.
+
+| Dataset | Episodic timescales |
+| --- | --- |
+| EgoLifeQA | 30 seconds, 3 minutes, 10 minutes, 1 hour |
+| LVBench and Video-MME | 10 seconds, 30 seconds, 3 minutes, 10 minutes |
+
+The explicit snapshot reader uses the same four scales as the corresponding
+builder. The generic memory class also supports their combined five-scale list.
+The paper describes both dataset configurations in its implementation appendix.
+[WorldMM implementation details](https://arxiv.org/html/2512.02425v2)
+
 For the serial 4090 pipeline, run
 `bash script/run_variant_full.sh RUN_ID`. It generates shared materials once,
 builds the three backends, runs their Base evaluations and then FreeRet component
