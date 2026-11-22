@@ -21,8 +21,14 @@ unset WORLDMM_LMDEPLOY_CACHE WORLDMM_LMDEPLOY_MAX_BATCH_SIZE WORLDMM_LMDEPLOY_SE
 server_pid=
 
 stop_server() {
+  # The service runs in its own process group; stop LMDeploy's engine workers with it.
   if [[ -n "$server_pid" ]]; then
-    kill -TERM "$server_pid" 2>/dev/null || true
+    kill -TERM -- "-$server_pid" 2>/dev/null || true
+    for _ in {1..30}; do
+      kill -0 -- "-$server_pid" 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL -- "-$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
     server_pid=
   fi
@@ -42,7 +48,7 @@ start_server() {
     echo "Port 23333 is occupied by an external service" >&2
     exit 2
   fi
-  bash script/serve_lmdeploy.sh videospy > "$run_root/server-$(date +%Y%m%d_%H%M%S).log" 2>&1 &
+  setsid bash script/serve_lmdeploy.sh videospy > "$run_root/server-$(date +%Y%m%d_%H%M%S).log" 2>&1 &
   server_pid=$!
   for ((attempt=0; attempt<180; attempt++)); do
     if curl -fsS http://127.0.0.1:23333/v1/models >/dev/null 2>&1; then return; fi
