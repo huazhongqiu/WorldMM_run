@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+IMAGE_MAX_SIZE = (512, 512)
+
 
 class LMDeployConfigurationError(ValueError):
     """Raised when the local LMDeploy endpoint is not configured."""
@@ -70,8 +72,14 @@ class LMDeployModel:
     def _image_data_url(image: Any) -> str:
         if isinstance(image, str):
             return image
+        from PIL import Image
+
+        # Same thumbnail bound as the upstream WorldMM Qwen3-VL/GPT clients (512x512, aspect kept),
+        # i.e. VideoSpy max_image_pixels=262144; native frames overflow the 262k context.
+        image = image.convert("RGB")
+        image.thumbnail(IMAGE_MAX_SIZE, Image.Resampling.LANCZOS)
         buffer = io.BytesIO()
-        image.convert("RGB").save(buffer, format="JPEG")
+        image.save(buffer, format="JPEG")
         return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
     def _messages(self, prompt: Any) -> list[dict[str, Any]]:

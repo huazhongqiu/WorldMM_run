@@ -164,9 +164,8 @@ def reextract_hourly(memory, directory, extractor=None):
     print(f"Hourly rebuild complete: {len(result['docs'])}/{len(expected)} active={active} backup={backup}", flush=True)
 
 
-def prepare_indexes(memory, times):
-    # Validate all OpenIE coverage before loading an embedding model. No LLM calls in this phase.
-    maximum = max(times)
+def require_prepared_openie(memory, maximum):
+    """Validate prepared OpenIE for every granularity up to maximum; indexing then makes no LLM calls."""
     expected_provenance = {"llm": memory.llm_model.model_name, "base_openie": memory.base_openie_hash()}
     for g, entries in memory.captions.items():
         expected = {compute_mdhash_id(e.text, prefix="chunk-") for e in entries if e.timestamp_int[1] <= maximum}
@@ -184,6 +183,11 @@ def prepare_indexes(memory, times):
             raise ValueError(f"Incomplete OpenIE: {path}; run --prepare-openie-only first")
     # A missing passage must be an error here, never an unexpected online model request.
     memory.require_precomputed_openie = True
+
+
+def prepare_indexes(memory, times):
+    # Validate all OpenIE coverage before loading an embedding model. No LLM calls in this phase.
+    require_prepared_openie(memory, max(times))
     ordered = sorted(set(times))
     remaining = iter(ordered)
     last_ready = None

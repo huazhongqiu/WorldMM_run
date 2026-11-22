@@ -10,7 +10,7 @@ export PYTHONPATH="$PWD:$PWD/src:$PWD/src/HippoRAG/src:$PWD/eval${PYTHONPATH:+:$
 export WORLDMM_EPISODIC_EMBEDDING_BATCH_SIZE="${WORLDMM_EPISODIC_EMBEDDING_BATCH_SIZE:-4}"
 python="${WORLDMM_PYTHON:-/opt/conda/envs/worldmm/bin/python}"
 if [[ "$backend" == wemm4b && "$action" != manifests && "$action" != shared ]]; then
-  python="${WORLDMM_WEMM_PYTHON:-/opt/conda/envs/worldmm_wemm4b/bin/python}"
+  python="${WORLDMM_WEMM_PYTHON:-/opt/conda/envs/llm_deploy/bin/python}"
   if [[ -n "${WORLDMM_WEMM_DEPENDENCIES:-}" ]]; then
     export PYTHONPATH="$PYTHONPATH:$WORLDMM_WEMM_DEPENDENCIES"
   fi

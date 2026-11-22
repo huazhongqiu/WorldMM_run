@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Serial single-GPU construction followed by the requested QA comparisons.
+# Build every index (script/run_variant_build.sh), then run the requested QA comparisons.
+# Qwen3.5 uses the VideoSpy service settings throughout; see run_variant_build.sh for GPU layout.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -9,18 +10,14 @@ run_root="${WORLDMM_PIPELINE_ROOT:-/workspace/worldmm-embedding-bench/full}/$run
 mkdir -p "$run_root"
 exec 9>"$run_root/pipeline.lock"
 flock -n 9 || { echo "Run $run_id is already active" >&2; exit 2; }
-git rev-parse HEAD > "$run_root/code_commit"
-git status --porcelain > "$run_root/working_tree_status"
+WORLDMM_PIPELINE_ROOT="$run_root" bash script/run_variant_build.sh build
 exec > >(tee -a "$run_root/pipeline.log") 2>&1
-export WORLDMM_CAPTION_WORKERS="${WORLDMM_CAPTION_WORKERS:-4}"
-export WORLDMM_EPISODIC_EMBEDDING_BATCH_SIZE="${WORLDMM_EPISODIC_EMBEDDING_BATCH_SIZE:-4}"
 export WORLDMM_LMDEPLOY_MAX_TOKENS="${WORLDMM_LMDEPLOY_MAX_TOKENS:-4096}"
 export WORLDMM_LMDEPLOY_HOST=127.0.0.1
-export WORLDMM_LMDEPLOY_CACHE="${WORLDMM_LMDEPLOY_CACHE:-0.02}"
-export WORLDMM_LMDEPLOY_SESSION_LEN="${WORLDMM_LMDEPLOY_SESSION_LEN:-32768}"
-export WORLDMM_LMDEPLOY_EAGER=1
-export LMDEPLOY_BIN="${LMDEPLOY_BIN:-/opt/conda/envs/worldmm_qwen35_server/bin/lmdeploy}"
-export WORLDMM_WEMM_DEPENDENCIES="${WORLDMM_WEMM_DEPENDENCIES:-/workspace/worldmm-embedding-bench/wemm-deps}"
+export WORLDMM_LMDEPLOY_GPU="${WORLDMM_LLM_GPU:-0}"
+export WORLDMM_EMBEDDING_DEVICE="cuda:${WORLDMM_EMBEDDING_GPU:-1}"
+export WORLDMM_VIS_EMBEDDING_DEVICE="cuda:${WORLDMM_EMBEDDING_GPU:-1}"
+unset WORLDMM_LMDEPLOY_CACHE WORLDMM_LMDEPLOY_MAX_BATCH_SIZE WORLDMM_LMDEPLOY_SESSION_LEN WORLDMM_LMDEPLOY_EAGER
 server_pid=
 
 stop_server() {
@@ -41,12 +38,11 @@ trap finish EXIT
 trap 'exit 130' INT TERM
 
 start_server() {
-  if [[ -n "$server_pid" ]]; then return; fi
   if curl -fsS http://127.0.0.1:23333/v1/models >/dev/null 2>&1; then
     echo "Port 23333 is occupied by an external service" >&2
     exit 2
   fi
-  bash script/serve_lmdeploy.sh debug-1gpu > "$run_root/server-$(date +%Y%m%d_%H%M%S).log" 2>&1 &
+  bash script/serve_lmdeploy.sh videospy > "$run_root/server-$(date +%Y%m%d_%H%M%S).log" 2>&1 &
   server_pid=$!
   for ((attempt=0; attempt<180; attempt++)); do
     if curl -fsS http://127.0.0.1:23333/v1/models >/dev/null 2>&1; then return; fi
@@ -63,27 +59,6 @@ run_stage() {
   bash script/run_variant_benchmark.sh "$dataset" "$backend" "$stage" "${@:4}"
 }
 
-for dataset in lvbench egolife videomme_long; do
-  run_stage "$dataset" original manifests
-  run_stage "$dataset" original audit
-done
-start_server
-for dataset in lvbench egolife videomme_long; do
-  run_stage "$dataset" original shared
-done
-for backend in original freeret wemm4b; do
-  start_server
-  for dataset in lvbench egolife videomme_long; do
-    run_stage "$dataset" "$backend" semantic
-  done
-  if [[ "$backend" != freeret ]]; then stop_server; fi
-  for stage in semantic-index episodic visual verify; do
-    for dataset in lvbench egolife videomme_long; do
-      run_stage "$dataset" "$backend" "$stage"
-    done
-  done
-done
-stop_server
 start_server
 qa_failed=0
 for backend in original freeret wemm4b; do

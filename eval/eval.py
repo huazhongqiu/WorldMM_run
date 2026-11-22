@@ -302,6 +302,10 @@ def main() -> int:
             args.extraction_dir or args.metadata_dir, "episodic_memory", str(video_id),
             f"openie_results_{model_name}.json",
         )
+        # Snapshot identities include the per-granularity OpenIE the builder seeded from.
+        prepared_openie = os.path.join(args.extraction_dir, "openie", str(video_id)) if args.extraction_dir else None
+        world_memory.episodic_memory.prepared_openie_dir = (
+            prepared_openie if prepared_openie and os.path.isdir(prepared_openie) else None)
         try:
             load_required_episodic_openie(world_memory, episodic_openie_file)
         except Exception as e:

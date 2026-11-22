@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROFILE="${1:-debug-1gpu}"
+PROFILE="${1:-videospy}"
 LMDEPLOY="${LMDEPLOY_BIN:-/opt/conda/envs/llm_deploy/bin/lmdeploy}"
 MODEL="${WORLDMM_LMDEPLOY_MODEL_PATH:-/myworkspace/models/Qwen/Qwen3.5-4B}"
 PORT="${WORLDMM_LMDEPLOY_PORT:-23333}"
@@ -21,14 +21,15 @@ case "$PROFILE" in
     CACHE="${WORLDMM_LMDEPLOY_CACHE:-0.1}"
     MAX_BATCH_SIZE="${WORLDMM_LMDEPLOY_MAX_BATCH_SIZE:-1}"
     ;;
-  formal-2gpu)
+  videospy|formal-2gpu)
+    # VideoSpy deployment settings; this service needs the whole GPU. Local embedding
+    # models (original, WeMM) must use another GPU, e.g. WORLDMM_EMBEDDING_DEVICE=cuda:1.
     GPU="${WORLDMM_LMDEPLOY_GPU:-0}"
     CACHE="${WORLDMM_LMDEPLOY_CACHE:-0.8}"
     MAX_BATCH_SIZE="${WORLDMM_LMDEPLOY_MAX_BATCH_SIZE:-8}"
-    echo "Formal profile: reserve physical GPU 1 for embeddings with WORLDMM_EMBEDDING_DEVICE=cuda:1." >&2
     ;;
   *)
-    echo "Usage: $0 [debug-1gpu|formal-2gpu]" >&2
+    echo "Usage: $0 [debug-1gpu|videospy]" >&2
     exit 2
     ;;
 esac

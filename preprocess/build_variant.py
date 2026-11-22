@@ -43,6 +43,11 @@ def shared_paths(unit, dataset):
             shared / f"semantic_memory/{unit}/semantic_extraction_results_{generator}.json")
 
 
+def prepared_openie_dir(dataset, unit):
+    """Per-granularity OpenIE used to seed every episodic graph without online extraction."""
+    return root("EXTRACTION") / "openie" if dataset == "egolife" else root("EXTRACTION") / "openie" / unit
+
+
 def check_coverage(captions, openie):
     expected = {compute_mdhash_id(item["text"], prefix="chunk-") for item in captions}
     for field in ("ner_results", "triple_results"):
@@ -131,6 +136,13 @@ def prepare_shared(dataset, unit, video, paths, llm, clip_seconds, smoke_clips, 
     expected = group_captions_and_get_openie_triples(rows, read_json(openie))
     if semantic_triples.keys() != expected.keys():
         raise ValueError(f"Incomplete semantic extraction: {semantic}")
+    # Upstream WorldMM extracts triples at every episodic granularity, not only the base one.
+    from egolife_precompute import prepare_openie
+
+    memory = EpisodicMemory(None, llm, PromptTemplateManager(), list(paths))
+    memory.load_captions_from_data({g: read_json(path) for g, path in paths.items()})
+    memory.load_precomputed_openie(str(openie), base_granularity=GRANULARITIES[0], extract_coarse=True)
+    prepare_openie(memory, prepared_openie_dir(dataset, unit), FINAL_TIME)
     freeze_json(provenance, {"caption_origin": str(legacy / f"caption/{unit}") if imported else "WorldMM caption generator",
                              "caption_sample_fps": 1, "clip_seconds": clip_seconds,
                              "subtitle_sha256": video.get("subtitle_sha256"), "generator": MODEL,
@@ -275,12 +287,11 @@ def episodic_views(dataset, unit, paths, openie, encoder, llm, times, verify, pr
         ensure_manifest(root("VIEW") / unit, identity)
     memory = EpisodicMemory(encoder, llm, PromptTemplateManager(), granularity, str(index_dir))
     memory.load_captions_from_data({g: read_json(path) for g, path in paths.items()})
-    memory.load_precomputed_openie(str(openie), base_granularity=granularity[0],
-                                   extract_coarse=dataset == "egolife")
+    memory.load_precomputed_openie(str(openie), base_granularity=granularity[0], extract_coarse=True)
+    memory.prepared_openie_dir = str(prepared_openie_dir(dataset, unit))
     if dataset == "egolife":
         snapshots = root("VIEW") / unit / "snapshots"
         memory.configure_snapshots(str(snapshots), load_only=verify)
-        memory.prepared_openie_dir = str(root("EXTRACTION") / "openie")
         if previous_openie_dir:
             for timestamp in times:
                 memory.upgrade_snapshot_identity(timestamp, previous_openie_dir)
@@ -289,10 +300,15 @@ def episodic_views(dataset, unit, paths, openie, encoder, llm, times, verify, pr
             memory.save_dir_root = tempfile.mkdtemp(prefix="build-", dir=index_dir)
             prepare_indexes(memory, times)
     else:
+        from egolife_precompute import require_prepared_openie
+
         check_coverage(read_json(paths[granularity[0]]), read_json(openie))
+        require_prepared_openie(memory, times[-1])
         ensure_manifest(index_dir, {"embedding": embedding_identity(encoder), "inference": MODEL,
                                     "captions": {g: digest(p) for g, p in paths.items()},
-                                    "openie": digest(openie)})
+                                    "openie": digest(openie),
+                                    "prepared_openie": {g: digest(Path(memory.prepared_openie_dir) / f"{g}.json")
+                                                        for g in granularity}})
         snapshots = root("VIEW") / unit / "snapshots"
         memory.configure_snapshots(str(snapshots), load_only=verify)
         if not verify and (snapshots / str(times[0]) / "manifest.json").is_file():
