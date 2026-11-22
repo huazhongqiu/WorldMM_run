@@ -24,7 +24,7 @@ case "$BACKEND" in
   wemm4b) retrieval_files="${VIDEO_SPY_CONFIG_ROOT}/lmdeploy.yml,${VIDEO_SPY_CONFIG_ROOT}/wemm4b_local.yml" ;;
 esac
 export WORLDMM_RETRIEVAL_CONFIG="${WORLDMM_RETRIEVAL_CONFIG:-$retrieval_files}"
-IDENTITY_FILE="${WORLDMM_EMBEDDING_IDENTITY_FILE:-/workspace/worldmm-freeret-setup/freeret-identity.env}"
+IDENTITY_FILE="${WORLDMM_EMBEDDING_IDENTITY_FILE:-${WORLDMM_NEEDED:-/myworkspace/projects/worldmm_needed}/freeret-identity.env}"
 if [[ "$BACKEND" != original && -r "$IDENTITY_FILE" ]]; then
   source "$IDENTITY_FILE"
 fi

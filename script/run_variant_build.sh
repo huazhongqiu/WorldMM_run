@@ -31,7 +31,7 @@ if [[ " ${backends[*]} " =~ " "(original|wemm4b)" " ]]; then
   fi
 fi
 
-run_root="${WORLDMM_PIPELINE_ROOT:-/workspace/worldmm-embedding-bench/build}/$run_id"
+run_root="${WORLDMM_PIPELINE_ROOT:-${WORLDMM_NEEDED:-/myworkspace/projects/worldmm_needed}/pipeline_runs/build}/$run_id"
 mkdir -p "$run_root"
 exec 9>"$run_root/pipeline.lock"
 flock -n 9 || { echo "Run $run_id is already active" >&2; exit 2; }

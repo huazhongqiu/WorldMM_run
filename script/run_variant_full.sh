@@ -6,7 +6,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 run_id="${1:?run ID required}"
 [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || exit 2
-run_root="${WORLDMM_PIPELINE_ROOT:-/workspace/worldmm-embedding-bench/full}/$run_id"
+run_root="${WORLDMM_PIPELINE_ROOT:-${WORLDMM_NEEDED:-/myworkspace/projects/worldmm_needed}/pipeline_runs/full}/$run_id"
 mkdir -p "$run_root"
 exec 9>"$run_root/pipeline.lock"
 flock -n 9 || { echo "Run $run_id is already active" >&2; exit 2; }

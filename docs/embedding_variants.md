@@ -16,8 +16,8 @@ Use the dataset runner for the fixed experiment. It reads shared captions and
 extractions, then writes semantic consolidation, indexes and causal views under
 the selected backend. Run the patched Qwen3.5 service before model-dependent
 stages. WeMM also needs the WorldMM Python dependencies in its Transformers 5
-environment; the runner defaults to `/opt/conda/envs/llm_deploy`, which has them
-installed. Set `WORLDMM_WEMM_PYTHON` to use another interpreter, or
+environment; the runner defaults to `/opt/conda/envs/llm_deploy`, prepared with
+`bash script/setup_llm_deploy_deps.sh`. Set `WORLDMM_WEMM_PYTHON` to use another interpreter, or
 `WORLDMM_WEMM_DEPENDENCIES` to append a dependency overlay to `PYTHONPATH`.
 
 ```bash
@@ -59,7 +59,7 @@ max batch 8, cache 0.8, no session-length or eager override) on `WORLDMM_LLM_GPU
 (default 0). That service needs the whole GPU, so the original and WeMM encoders run
 on `WORLDMM_EMBEDDING_GPU` (default 1); FreeRet embeds through the service and needs
 one GPU (`WORLDMM_BUILD_BACKENDS=freeret`). Progress and service logs live under
-`/workspace/worldmm-embedding-bench/build/RUN_ID`. `bash script/run_variant_full.sh
+`/myworkspace/projects/worldmm_needed/pipeline_runs/build/RUN_ID`. `bash script/run_variant_full.sh
 RUN_ID` builds the same way, then runs the Base evaluations and FreeRet component
 comparisons with the same service and GPU layout.
 
@@ -96,7 +96,8 @@ No cache migration, deletion, full preprocessing or QA run is performed by setup
 
 The patched service and the WeMM client both use `/opt/conda/envs/llm_deploy`
 (LMDeploy `0.14.0+freeret.3`, Transformers 5). The launcher reads deployment fingerprints from
-`/workspace/worldmm-freeret-setup/freeret-identity.env`. Start the patched service
+`/myworkspace/projects/worldmm_needed/freeret-identity.env`, written by
+`bash script/make_freeret_identity.sh`. Start the patched service
 on the address configured in VideoSpy `lmdeploy.yml` before a FreeRet run.
 
 LVBench and Video-MME caption windows use the YAML `clip_seconds` (currently 10).

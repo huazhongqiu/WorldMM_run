@@ -5,7 +5,7 @@
 # Tokenizer: the patched LMDeploy server's own tokenizer_fingerprint, which it returns per request.
 set -euo pipefail
 
-OUTPUT="${1:-${WORLDMM_EMBEDDING_IDENTITY_FILE:-/workspace/worldmm-freeret-setup/freeret-identity.env}}"
+OUTPUT="${1:-${WORLDMM_EMBEDDING_IDENTITY_FILE:-${WORLDMM_NEEDED:-/myworkspace/projects/worldmm_needed}/freeret-identity.env}}"
 MODEL="${2:-${QWEN35_MODEL_PATH:-/myworkspace/models/Qwen/Qwen3.5-4B}}"
 PYTHON="${WORLDMM_LMDEPLOY_PYTHON:-/opt/conda/envs/llm_deploy/bin/python}"
 
