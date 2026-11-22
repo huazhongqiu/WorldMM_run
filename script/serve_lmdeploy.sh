@@ -35,6 +35,12 @@ case "$PROFILE" in
 esac
 
 [[ "$CACHE" =~ ^0\.[0-9]+$|^1(\.0+)?$ ]] || fail "WORLDMM_LMDEPLOY_CACHE must be in (0, 1]"
+# GPU indexes count the devices this job can see, matching PyTorch's cuda:N.
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  IFS=, read -r -a visible <<< "$CUDA_VISIBLE_DEVICES"
+  [[ "$GPU" =~ ^[0-9]+$ && "$GPU" -lt ${#visible[@]} ]] || fail "GPU $GPU outside CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+  GPU="${visible[$GPU]}"
+fi
 [[ "$MAX_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || fail "WORLDMM_LMDEPLOY_MAX_BATCH_SIZE must be a positive integer"
 
 echo "Starting Qwen3.5-4B profile=$PROFILE gpu=$GPU host=$HOST cache=$CACHE max_batch_size=$MAX_BATCH_SIZE" >&2

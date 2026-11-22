@@ -20,7 +20,12 @@ read -r -a backends <<< "${WORLDMM_BUILD_BACKENDS:-original freeret wemm4b}"
 read -r -a build_args <<< "${WORLDMM_BUILD_ARGS:-}"
 llm_gpu="${WORLDMM_LLM_GPU:-0}"
 embedding_gpu="${WORLDMM_EMBEDDING_GPU:-1}"
-gpus=$(nvidia-smi -L | wc -l)
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  IFS=, read -r -a visible <<< "$CUDA_VISIBLE_DEVICES"
+  gpus=${#visible[@]}
+else
+  gpus=$(nvidia-smi -L | wc -l)
+fi
 gpu_ok() { [[ "$1" =~ ^[0-9]+$ && "$1" -lt "$gpus" ]]; }
 gpu_ok "$llm_gpu" || { echo "GPU $llm_gpu not available ($gpus detected)" >&2; exit 2; }
 if [[ " ${backends[*]} " =~ " "(original|wemm4b)" " ]]; then
