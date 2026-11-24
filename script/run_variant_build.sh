@@ -40,9 +40,16 @@ run_root="${WORLDMM_PIPELINE_ROOT:-${WORLDMM_NEEDED:-/myworkspace/projects/world
 mkdir -p "$run_root"
 exec 9>"$run_root/pipeline.lock"
 flock -n 9 || { echo "Run $run_id is already active" >&2; exit 2; }
-git rev-parse HEAD > "$run_root/code_commit" 2>/dev/null || true
-git status --porcelain > "$run_root/working_tree_status" 2>/dev/null || true
 exec > >(tee -a "$run_root/pipeline.log") 2>&1
+# The repo owner differs from the job user, and git 2.34 ignores `-c safe.directory`, so trust this
+# checkout through a temporary global config instead of changing the machine's own.
+git_config=$(mktemp)
+printf '[include]\n\tpath = %s/.gitconfig\n[safe]\n\tdirectory = %s\n' "${HOME:-}" "$PWD" > "$git_config"
+GIT_CONFIG_GLOBAL="$git_config" git rev-parse HEAD > "$run_root/code_commit" \
+  || echo "WARNING: code commit not recorded" >&2
+GIT_CONFIG_GLOBAL="$git_config" git status --porcelain > "$run_root/working_tree_status" \
+  || echo "WARNING: working tree status not recorded" >&2
+rm -f "$git_config"
 export WORLDMM_LMDEPLOY_MAX_TOKENS="${WORLDMM_LMDEPLOY_MAX_TOKENS:-4096}"
 export WORLDMM_LMDEPLOY_HOST=127.0.0.1
 export WORLDMM_LMDEPLOY_GPU="$llm_gpu"
