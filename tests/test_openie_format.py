@@ -153,3 +153,57 @@ def test_incomplete_hourly_reextraction_keeps_original_active(tmp_path):
         def ner(self,key,text):return SimpleNamespace(unique_entities=[],metadata={"error":"failed"})
     with pytest.raises(RuntimeError):reextract_hourly(memory,output,extractor=Extractor())
     assert (output/"1h.json").read_text()=="original"
+
+
+class EntityMismatchExtractor:
+    """Triple extraction truncates whenever the prompt lists an entity absent from the text."""
+    def __init__(self, looping_segment=None):
+        self.looping_segment, self.requests = looping_segment, []
+    def ner(self, key, text):
+        self.requests.append(("ner", text))
+        return SimpleNamespace(unique_entities=sorted({w for w in text.split() if w.istitle()}), metadata={})
+    def triple_extraction(self, key, text, entities):
+        self.requests.append(("triples", text, tuple(entities)))
+        looping = self.looping_segment is not None and text in self.looping_segment
+        if looping or any(e not in text for e in entities):
+            return SimpleNamespace(triples=[], metadata={"error": "truncated", "output_truncated": True})
+        return SimpleNamespace(triples=[[e, "in", "scene"] for e in entities], metadata={})
+
+
+def test_segment_ner_fallback_recovers_caption_that_old_path_cannot():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
+    from egolife_precompute import extract_caption
+    extractor = EntityMismatchExtractor()
+    doc = extract_caption(extractor, "id", "Alice holds cup\n\nBob opens door")
+    assert doc["extracted_entities"] == ["Alice", "Bob"]
+    assert doc["extracted_triples"] == [["Alice", "in", "scene"], ["Bob", "in", "scene"]]
+    assert doc["extraction"] == {"policy": "bounded-openie-v1", "max_segment_chars": 1200, "segments": 2,
+                                 "fallback": {"policy": "segment-ner", "segments": 2}}
+    assert len(extractor.requests) == len(set(extractor.requests))
+
+
+def test_fallback_not_used_when_old_path_succeeds():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
+    from egolife_precompute import extract_caption
+    extractor = EntityMismatchExtractor()
+    doc = extract_caption(extractor, "id", "Alice holds cup with Bob")
+    assert doc == {"idx": "id", "passage": "Alice holds cup with Bob", "extracted_entities": ["Alice", "Bob"],
+                   "extracted_triples": [["Alice", "in", "scene"], ["Bob", "in", "scene"]],
+                   "extraction": {"policy": "bounded-openie-v1", "max_segment_chars": 1200, "segments": 1}}
+    assert extractor.requests == [("ner", "Alice holds cup with Bob"),
+                                  ("triples", "Alice holds cup with Bob", ("Alice", "Bob"))]
+
+
+def test_failed_fallback_stays_fail_closed(tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
+    from egolife_precompute import prepare_openie
+    bad = "Alice holds cup\n\nBob opens door"
+    memory = SimpleNamespace(captions={"3min": [SimpleNamespace(text=text, timestamp_int=(0,1)) for text in [bad, "Carol sits"]]},
+                             llm_model=SimpleNamespace(model_name="llm"), base_granularity="30sec",
+                             base_openie_hash=lambda: "hash")
+    extractor = EntityMismatchExtractor(looping_segment="Alice holds cup")
+    with pytest.raises(RuntimeError, match="saved successful captions.*minimal segment"):
+        prepare_openie(memory, tmp_path, 1, extractor=extractor)
+    docs = json.loads((tmp_path / "3min.json").read_text())["docs"]
+    assert [d["passage"] for d in docs] == ["Carol sits"]
+    assert "fallback" not in docs[0]["extraction"]

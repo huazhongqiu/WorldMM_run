@@ -53,11 +53,15 @@ def split_passage(passage, limit=1200):
     return parts
 
 
+class OpenIETruncatedError(RuntimeError):
+    pass
+
+
 def extract_caption(extractor, key, passage):
     """Bound generation per segment, then attach merged facts to the original caption."""
     def smaller(text):
         if len(text) < 2:
-            raise RuntimeError(f"OpenIE still truncated on minimal segment: {key}")
+            raise OpenIETruncatedError(f"OpenIE still truncated on minimal segment: {key}")
         return split_passage(text, max(1, len(text) // 2))
 
     def entities_for(text):
@@ -78,11 +82,33 @@ def extract_caption(extractor, key, passage):
             raise RuntimeError(f"Triple extraction failed for {key}: {result.metadata['error']}")
         return result.triples
 
+    def local_triples_for(text):
+        # Caption-wide entities absent from a small segment can induce repetition loops; use the segment's own.
+        ents = entities if text == passage else entities_for(text)
+        if set(ents) == set(entities):
+            return [triple for part in smaller(text) for triple in local_triples_for(part)]
+        result = extractor.triple_extraction(compute_mdhash_id(text, prefix="chunk-"), text, ents)
+        if result.metadata.get("output_truncated"):
+            return [triple for part in smaller(text) for triple in local_triples_for(part)]
+        if result.metadata.get("error"):
+            raise RuntimeError(f"Triple extraction failed for {key}: {result.metadata['error']}")
+        return result.triples
+
+    def segment_triples(part):
+        try:
+            return triples_for(part)
+        except OpenIETruncatedError:
+            fallback.append(part)
+            return local_triples_for(part)
+
+    fallback = []
     segments = split_passage(passage)
-    triples = sorted({tuple(t) for part in segments for t in triples_for(part)})
+    triples = sorted({tuple(t) for part in segments for t in segment_triples(part)})
+    extraction = {"policy": "bounded-openie-v1", "max_segment_chars": 1200, "segments": len(segments)}
+    if fallback:
+        extraction["fallback"] = {"policy": "segment-ner", "segments": len(fallback)}
     return {"idx": key, "passage": passage, "extracted_entities": entities,
-            "extracted_triples": [list(t) for t in triples],
-            "extraction": {"policy": "bounded-openie-v1", "max_segment_chars": 1200, "segments": len(segments)}}
+            "extracted_triples": [list(t) for t in triples], "extraction": extraction}
 
 
 def prepare_openie(memory, directory, until_time, extractor=None):
