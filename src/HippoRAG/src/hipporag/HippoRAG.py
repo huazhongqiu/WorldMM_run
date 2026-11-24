@@ -432,7 +432,9 @@ class HippoRAG:
             Does not explicitly raise exceptions within the provided function logic.
         """
 
-        if "name" in self.graph.vs:
+        # `"name" in self.graph.vs` tests vertex membership and is always False, which recounted every
+        # indexed chunk's triples on each incremental update.
+        if "name" in self.graph.vs.attribute_names():
             current_graph_nodes = set(self.graph.vs["name"])
         else:
             current_graph_nodes = set()
@@ -766,6 +768,9 @@ class HippoRAG:
                 valid_weights["weight"].append(weight)
             else:
                 logger.warning(f"Edge {source_node_id} -> {target_node_id} is not valid.")
+        # node_to_node_stats holds every edge, including earlier updates; rewrite the edge set from it so
+        # incremental indexing does not accumulate parallel edges that PPR would sum.
+        self.graph.delete_edges(self.graph.es)
         self.graph.add_edges(
             valid_edges,
             attributes=valid_weights

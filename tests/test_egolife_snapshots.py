@@ -71,6 +71,19 @@ def test_snapshot_corruption_rejected(tmp_path):
         m.index(1)
 
 
+@pytest.mark.parametrize("version", [2, 3])
+def test_snapshot_from_before_graph_fix_rejected(tmp_path, version):
+    m = memory(tmp_path)
+    m.configure_snapshots(str(tmp_path / "snapshots"), load_only=False)
+    m.indexed_time = 1
+    m.save_snapshot(1)
+    metadata = tmp_path / "snapshots" / "1" / "manifest.json"
+    doc = json.loads(metadata.read_text()); doc["identity"]["version"] = version; metadata.write_text(json.dumps(doc))
+    m.configure_snapshots(str(tmp_path / "snapshots"), load_only=True)
+    with pytest.raises(ValueError, match="rebuild"):
+        m.index(1)
+
+
 def test_snapshot_identity_distinguishes_embedding_revisions(tmp_path):
     m = memory(tmp_path)
     m.embedding_model.index_identity = {"backend": "freeret", "weights": "first"}

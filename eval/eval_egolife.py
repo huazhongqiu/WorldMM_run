@@ -755,10 +755,7 @@ def main():
         episodic = world_memory.episodic_memory
         for timestamp in sorted({_query_time(r) for r in eval_data}):
             manifest = load_json(str(episodic.snapshot_root / str(timestamp) / "manifest.json"))
-            identity = manifest["identity"]
-            version = identity.get("version")
-            if version not in (2, 3) or identity != episodic._snapshot_identity(timestamp, version=version):
-                raise ValueError(f"Snapshot identity mismatch: {timestamp}")
+            episodic.check_snapshot_identity(timestamp, manifest["identity"])
 
     # Load semantic results
     metadata_dir = args.metadata_dir or "output/metadata"

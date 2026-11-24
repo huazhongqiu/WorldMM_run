@@ -14,13 +14,16 @@ from dataclasses import dataclass
 
 from ...llm import LLMModel, PromptTemplateManager
 from ...embedding import EmbeddingModel
-from ...index_manifest import embedding_identity, write_json
+from ...index_manifest import embedding_identity
 
 from hipporag import HippoRAG
 from .utils import compute_mdhash_id
 
 logger = logging.getLogger(__name__)
 DEFAULT_EMBEDDING_BATCH_SIZE = 64
+# Version 4: HippoRAG graphs no longer accumulate parallel edges or recount fact edges across
+# incremental updates. Earlier snapshots hold those graphs and must be rebuilt.
+SNAPSHOT_VERSION = 4
 
 
 def _embedding_batch_size() -> int:
@@ -208,15 +211,13 @@ class EpisodicMemory:
     def base_openie_hash(self) -> str:
         return hashlib.sha256(json.dumps(self.precomputed_openie, sort_keys=True).encode()).hexdigest()
 
-    def _snapshot_identity(self, until_time: int, *, version: int = 3) -> Dict[str, Any]:
+    def _snapshot_identity(self, until_time: int) -> Dict[str, Any]:
         captions = {g: [(e.text, e.date, e.start_time, e.end_time) for e in entries
                         if e.timestamp_int[1] <= until_time]
                     for g, entries in self.captions.items()}
         payload = json.dumps(captions, sort_keys=True).encode()
         prepared = {}
-        if self.prepared_openie_dir and version == 2:
-            prepared = {f.name: self._file_hash(f) for f in sorted(Path(self.prepared_openie_dir).glob("*.json"))}
-        elif self.prepared_openie_dir:
+        if self.prepared_openie_dir:
             for g, entries in captions.items():
                 path = Path(self.prepared_openie_dir) / f"{g}.json"
                 if path.is_file():
@@ -226,7 +227,7 @@ class EpisodicMemory:
                     prepared[path.name] = hashlib.sha256(
                         json.dumps({"provenance": data.get("provenance"), "docs": docs}, sort_keys=True).encode()
                     ).hexdigest()
-        return {"version": version, "until_time": until_time, "prepared_openie": prepared,
+        return {"version": SNAPSHOT_VERSION, "until_time": until_time, "prepared_openie": prepared,
                 "captions": hashlib.sha256(payload).hexdigest(), "base_openie": self.base_openie_hash(),
                 "embedding": embedding_identity(self.embedding_model) or self.embedding_model.text_model_name,
                 "llm": self.llm_model.model_name}
@@ -264,10 +265,7 @@ class EpisodicMemory:
     def _load_snapshot(self, until_time: int, *, for_update: bool = False) -> None:
         source = self.snapshot_root / str(until_time)
         manifest = _load_json(str(source / "manifest.json"))
-        identity = manifest["identity"]
-        version = identity.get("version")
-        if version not in (2, 3) or identity != self._snapshot_identity(until_time, version=version):
-            raise ValueError(f"Snapshot identity mismatch: {source}")
+        self.check_snapshot_identity(until_time, manifest["identity"])
         for relative, checksum in manifest["files"].items():
             path = source / relative
             if not path.resolve().is_relative_to(source.resolve()) or self._file_hash(path) != checksum:
@@ -297,23 +295,13 @@ class EpisodicMemory:
                                 for g, entries in self.captions.items()}
         self.indexed_time = until_time
 
-    def upgrade_snapshot_identity(self, until_time: int, previous_openie_dir: str) -> None:
-        """Reidentify a version-two snapshot when its eligible OpenIE is unchanged."""
-        path = self.snapshot_root / str(until_time) / "manifest.json"
-        manifest = _load_json(str(path))
-        identity = manifest["identity"]
-        if identity.get("version") == 3:
-            return
-        target = self._snapshot_identity(until_time)
-        current = self.prepared_openie_dir
-        try:
-            self.prepared_openie_dir = previous_openie_dir
-            if identity != self._snapshot_identity(until_time, version=2) or self._snapshot_identity(until_time) != target:
-                raise ValueError(f"Cannot migrate incompatible snapshot: {path}")
-        finally:
-            self.prepared_openie_dir = current
-        manifest["identity"] = target
-        write_json(path, manifest)
+    def check_snapshot_identity(self, until_time: int, identity: Dict[str, Any]) -> None:
+        source = self.snapshot_root / str(until_time)
+        if identity.get("version") != SNAPSHOT_VERSION:
+            raise ValueError(f"Snapshot version {identity.get('version')} predates the HippoRAG graph fix "
+                             f"(version {SNAPSHOT_VERSION}); rebuild it: {source}")
+        if identity != self._snapshot_identity(until_time):
+            raise ValueError(f"Snapshot identity mismatch: {source}")
 
     def _get_or_create_hipporag(self, granularity: str) -> HippoRAG:
         """Get or create HippoRAG instance for a granularity level."""

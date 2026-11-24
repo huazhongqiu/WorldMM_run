@@ -277,7 +277,7 @@ def validate_visual_identity(directory, captions, encoder, budget):
     ensure_manifest(directory, visual_identity(captions, encoder, budget))
 
 
-def episodic_views(dataset, unit, paths, openie, encoder, llm, times, verify, previous_openie_dir=None):
+def episodic_views(dataset, unit, paths, openie, encoder, llm, times, verify):
     from egolife_precompute import prepare_indexes
 
     granularity = list(paths)
@@ -292,9 +292,6 @@ def episodic_views(dataset, unit, paths, openie, encoder, llm, times, verify, pr
     if dataset == "egolife":
         snapshots = root("VIEW") / unit / "snapshots"
         memory.configure_snapshots(str(snapshots), load_only=verify)
-        if previous_openie_dir:
-            for timestamp in times:
-                memory.upgrade_snapshot_identity(timestamp, previous_openie_dir)
         if not verify:
             index_dir.mkdir(parents=True, exist_ok=True)
             memory.save_dir_root = tempfile.mkdtemp(prefix="build-", dir=index_dir)
@@ -325,7 +322,6 @@ def main():
     parser.add_argument("--stage", choices=("shared", "semantic", "semantic-index", "episodic", "visual", "verify", "audit"), required=True)
     parser.add_argument("--unit", action="append", help="Restrict to a manifest video ID or A1_JAKE")
     parser.add_argument("--legacy-only", action="store_true", help="Import existing LVBench shared inputs")
-    parser.add_argument("--previous-openie-dir", help="Audit and upgrade snapshot identity from its previous OpenIE files")
     parser.add_argument("--smoke-clips", type=int, help="Generate the first N captions in an isolated smoke root")
     parser.add_argument("--smoke-questions", type=int, help="Use the first N time-ordered EgoLife questions")
     args = parser.parse_args()
@@ -337,8 +333,6 @@ def main():
     if args.stage == "audit":
         record_legacy_assets(dataset)
         return
-    if args.previous_openie_dir and (dataset != "egolife" or args.stage != "verify"):
-        parser.error("--previous-openie-dir is for EgoLife verification")
     manifest = root("MANIFEST")
     rows = read_json(manifest / "questions.json")
     videos = read_json(manifest / "videos.json")
@@ -408,8 +402,7 @@ def main():
         else:
             memory = WorldMemory(encoder, llm, episodic_granularities=list(paths))
             memory.episodic_memory = episodic_views(
-                dataset, unit, paths, openie, encoder, llm, times, verify=True,
-                previous_openie_dir=args.previous_openie_dir)
+                dataset, unit, paths, openie, encoder, llm, times, verify=True)
             memory.load_semantic_triples(file_path=str(semantic_path))
             memory.semantic_memory.load_vector_store(semantic_index_dir, semantic_path)
             validate_visual_identity(visual_dir, visual_base, encoder, budget)
