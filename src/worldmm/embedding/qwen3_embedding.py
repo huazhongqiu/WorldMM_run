@@ -11,8 +11,11 @@ class Qwen3EmbeddingModel:
         self.model_name = model_name
         self.device = device
         
+        # Without an explicit device, SentenceTransformer moves the model to the default cuda:0,
+        # overriding device_map and landing on the LMDeploy GPU.
         self.model = SentenceTransformer(
             model_name,
+            device=None if device == "auto" else device,
             model_kwargs={"attn_implementation": os.environ.get("WORLDMM_TEXT_ATTENTION", "flash_attention_2"), "torch_dtype": "auto", "device_map": device},
             processor_kwargs={"padding_side": "left"},
         )
