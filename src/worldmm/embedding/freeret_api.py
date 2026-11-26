@@ -44,7 +44,10 @@ class FreeRetAPI:
         self.base_url = (base_url or os.environ.get('WORLDMM_FREERET_API_BASE', 'http://127.0.0.1:23333/v1')).rstrip('/')
         self.model_name = model_name or os.environ.get('WORLDMM_FREERET_MODEL', 'Qwen3.5-4B')
         self.api_key = api_key or os.environ.get('WORLDMM_FREERET_API_KEY', 'EMPTY')
-        self.client = client if client is not None else httpx.Client(timeout=timeout)
+        # LMDeploy's uvicorn drops idle keep-alive connections after 5s, which equals httpx's
+        # default expiry; expire earlier so pooled sockets idle during frame decoding are not reused.
+        self.client = client if client is not None else httpx.Client(
+            timeout=timeout, limits=httpx.Limits(keepalive_expiry=2.0))
         if nframes <= 0 or max_pixels <= 0:
             raise ValueError('nframes and max_pixels must be positive')
         self.nframes, self.max_pixels = nframes, max_pixels
@@ -131,13 +134,23 @@ class FreeRetAPI:
             capture.release()
 
     def _request(self, content, *, max_pixels):
-        result = self.client.post(self.base_url + '/embeddings', headers={'Authorization': 'Bearer ' + self.api_key}, json={
+        payload = {
             'model': self.model_name, 'embedding_method': 'freeret', 'encoding_format': 'float',
             'token_top_k': 512, 'messages': [
                 {'role': 'system', 'content': 'You are a helpful assistant.'},
                 {'role': 'user', 'content': content}],
             'mm_processor_kwargs': {'image': {'min_pixels': min(65536, max_pixels), 'max_pixels': max_pixels}},
-        })
+        }
+        # A disconnect before any response means a stale keep-alive socket, not a served request;
+        # embeddings are read-only, so resending is safe. Other errors still fail immediately.
+        for attempt in range(3):
+            try:
+                result = self.client.post(self.base_url + '/embeddings',
+                                          headers={'Authorization': 'Bearer ' + self.api_key}, json=payload)
+                break
+            except httpx.RemoteProtocolError:
+                if attempt == 2:
+                    raise
         result.raise_for_status()
         value = result.json()
         if (value.get('model') != self.model_name or value.get('embedding_method') != self.feature_version

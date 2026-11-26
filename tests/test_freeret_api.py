@@ -85,6 +85,20 @@ def test_failure_does_not_poison_subsequent_request():
     assert api.encode('a').shape == (1, 2560)
 
 
+def test_stale_keepalive_disconnect_is_resent_but_bounded():
+    count = 0
+    def handle(request):
+        nonlocal count
+        count += 1
+        if count <= 2:
+            raise httpx.RemoteProtocolError('Server disconnected without sending a response.')
+        return httpx.Response(200, json=response())
+    assert client(handle).encode('a').shape == (1, 2560) and count == 3
+    def always(request):
+        raise httpx.RemoteProtocolError('Server disconnected without sending a response.')
+    with pytest.raises(httpx.RemoteProtocolError): client(always).encode('a')
+
+
 def test_source_time_video_frames_preserve_order(tmp_path):
     cv2 = pytest.importorskip('cv2')
     path = tmp_path / 'source.avi'
