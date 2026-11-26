@@ -3,6 +3,8 @@ import base64
 import hashlib
 import json
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
 
@@ -23,7 +25,7 @@ class FreeRetAPI:
     def __init__(self, base_url=None, model_name=None, api_key=None, client=None,
                  timeout=300, nframes=16, max_pixels=360 * 420,
                  model_fingerprint=None, processor_fingerprint=None, tokenizer_fingerprint=None,
-                 model_config=None, prompt_templates=None):
+                 model_config=None, prompt_templates=None, concurrency=None):
         config = dict(model_config or {})
         base_url = config.get('api_base', base_url)
         model_name = config.get('model_name', model_name)
@@ -46,6 +48,13 @@ class FreeRetAPI:
         if nframes <= 0 or max_pixels <= 0:
             raise ValueError('nframes and max_pixels must be positive')
         self.nframes, self.max_pixels = nframes, max_pixels
+        # Transport only: the engine encodes each request independently, so this stays out of
+        # the identity and existing indexes keep matching. Default matches the service max batch.
+        if concurrency is None:
+            concurrency = int(os.environ.get('WORLDMM_FREERET_CONCURRENCY', 8))
+        if type(concurrency) is not int or concurrency <= 0:
+            raise ValueError('concurrency must be a positive integer')
+        self.concurrency = concurrency
         # These are explicit deployment identities, never credentials or transient C/S/R settings.
         self.fingerprint = {
             'backend': 'freeret', 'model': self.model_name, 'endpoint': self.base_url,
@@ -60,6 +69,7 @@ class FreeRetAPI:
             'max_pixels': max_pixels, 'image_encoding': 'RGB_JPEG_quality95_v1', 'token_top_k': 512,
         }
         self._observed_tokenizer = None
+        self._tokenizer_lock = threading.Lock()
 
     @property
     def index_identity(self):
@@ -160,9 +170,10 @@ class FreeRetAPI:
         expected = self.fingerprint['tokenizer_fingerprint']
         if not isinstance(tokenizer, str) or not tokenizer or (expected != 'UNVERIFIED' and tokenizer != expected):
             raise ValueError('Missing or mismatched tokenizer fingerprint')
-        if self._observed_tokenizer is not None and tokenizer != self._observed_tokenizer:
-            raise ValueError('Tokenizer changed during encoding')
-        self._observed_tokenizer = tokenizer
+        with self._tokenizer_lock:
+            if self._observed_tokenizer is not None and tokenizer != self._observed_tokenizer:
+                raise ValueError('Tokenizer changed during encoding')
+            self._observed_tokenizer = tokenizer
         return {'dense': dense / norm, 'token_ids': ids, 'token_probs': probs, 'tokens': tokens,
                 'metadata': {'feature_version': self.feature_version, 'distribution_version': self.distribution_version,
                              'tokenizer_fingerprint': tokenizer, 'retained_probability_mass': float(probability.sum()),
@@ -181,10 +192,8 @@ class FreeRetAPI:
         if type(frames_count) is not int or frames_count <= 0 or type(pixels) is not int or pixels <= 0:
             raise ValueError('nframes/max_pixels must be positive integers')
         values = content if isinstance(content, list) else [content]
-        results = []
-        # Endpoint messages represent one item. Sequential requests preserve order and
-        # fail the entire call rather than returning partial or fabricated embeddings.
-        for value in values:
+
+        def encode_one(value):
             if modality in ('text', 'vis_query'):
                 if not isinstance(value, str):
                     raise TypeError('Text embeddings require strings')
@@ -212,8 +221,20 @@ class FreeRetAPI:
             representation['metadata'] = dict(representation['metadata'], input_modality=modality,
                                               prompt_sha256=hashlib.sha256(json.dumps(parts[0], sort_keys=True).encode()).hexdigest(),
                                               nframes=frames_count, max_pixels=pixels)
-            results.append(representation)
-        return results
+            return representation
+
+        # Endpoint messages represent one item. Concurrent requests let the engine batch them;
+        # results keep input order and any failure fails the entire call rather than returning
+        # partial or fabricated embeddings.
+        if self.concurrency == 1 or len(values) <= 1:
+            return [encode_one(value) for value in values]
+        with ThreadPoolExecutor(max_workers=min(self.concurrency, len(values))) as pool:
+            futures = [pool.submit(encode_one, value) for value in values]
+            try:
+                return [future.result() for future in futures]
+            finally:
+                for future in futures:
+                    future.cancel()
 
     def encode(self, content, modality='text', **kwargs):
         records = self.encode_representations(content, modality=modality, **kwargs)

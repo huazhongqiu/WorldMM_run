@@ -165,6 +165,36 @@ def visual_index(base, destination, encoder, dataset, budget):
     rows = read_json(base)
     reader = None
     previous = None
+    # FreeRet clips are independent service requests; submit a group so the engine can batch them.
+    group = encoder._freeret.concurrency if encoder.backend == "freeret" else 1
+    pending = []
+
+    def flush():
+        try:
+            if encoder.backend == "original":
+                specs = [{"video": images, "sample_fps": len(images) / (sample["end"] - sample["start"])}
+                         for _, sample, images in pending]
+            else:
+                specs = [{"video": images, "frame_timestamps": [i / sample["fps"] for i in sample["frame_indices"]],
+                          "video_start": sample["start"], "video_end": sample["end"]}
+                         for _, sample, images in pending]
+            if encoder.backend == "freeret":
+                encoded = encoder.encode_representations(
+                    specs, modality="video", nframes=len(specs[0]["video"]), batch_size=1)
+            else:
+                encoded = [encoder.encode_video([spec], nframes=len(spec["video"]), batch_size=1)[0]
+                           for spec in specs]
+        finally:
+            for _, _, images in pending:
+                for image in images:
+                    image.close()
+        for (key, sample, _), record in zip(pending, encoded, strict=True):
+            records[key] = record
+            samples[key] = sample
+            if len(samples) % 32 == 0:
+                save_visual(output, records, metadata, samples)
+        pending.clear()
+
     for row in rows:
         key = row["video_path"] if dataset == "egolife" else row["start_time"]
         if key in records and key in samples:
@@ -177,28 +207,16 @@ def visual_index(base, destination, encoder, dataset, budget):
         start = row.get("start_sec", hhmmss(row["start_time"]))
         end = min(row.get("end_sec", hhmmss(row["end_time"])), len(reader) / fps)
         indices = frame_indices(fps, len(reader), start, end, budget)
+        if pending and len(pending[0][1]["frame_indices"]) != len(indices):
+            flush()  # One request group shares a frame count; short clips start a new group.
         images = [Image.fromarray(frame) for frame in reader.get_batch(indices).asnumpy()]
-        try:
-            if encoder.backend == "original":
-                spec = {"video": images, "sample_fps": len(images) / (end - start)}
-                record = encoder.encode_video([spec], nframes=len(images), batch_size=1)[0]
-            else:
-                spec = {"video": images, "frame_timestamps": [i / fps for i in indices],
-                        "video_start": start, "video_end": end}
-                if encoder.backend == "freeret":
-                    record = encoder.encode_representations(
-                        [spec], modality="video", nframes=len(images), batch_size=1)[0]
-                else:
-                    record = encoder.encode_video([spec], nframes=len(images), batch_size=1)[0]
-        finally:
-            for image in images:
-                image.close()
-        records[key] = record
-        samples[key] = {"source": source, "start": start, "end": end, "fps": fps,
-                        "frame_indices": indices, "nframes": len(indices),
-                        "subtitle_cues": len(row.get("subtitles", []))}
-        if len(samples) % 32 == 0:
-            save_visual(output, records, metadata, samples)
+        pending.append((key, {"source": source, "start": start, "end": end, "fps": fps,
+                              "frame_indices": indices, "nframes": len(indices),
+                              "subtitle_cues": len(row.get("subtitles", []))}, images))
+        if len(pending) == group:
+            flush()
+    if pending:
+        flush()
     if len(records) != len(rows) or len(samples) != len(rows):
         raise ValueError(f"Incomplete visual index: {output}, records={len(records)}, clips={len(rows)}")
     if not output.exists() or len(samples) % 32:

@@ -17,8 +17,8 @@ def response():
                 {'token_id': i, 'token': str(i), 'probability': .001} for i in range(512)]}]}
 
 
-def client(handler=None):
-    return FreeRetAPI(client=httpx.Client(transport=httpx.MockTransport(
+def client(handler=None, concurrency=None):
+    return FreeRetAPI(concurrency=concurrency, client=httpx.Client(transport=httpx.MockTransport(
         handler or (lambda request: httpx.Response(200, json=response())))))
 
 
@@ -29,7 +29,7 @@ def test_shapes_order_and_raw_probabilities():
         body = json.loads(request.content)
         seen.append(body)
         result = response()
-        result['data'][0]['embedding'][0] = len(seen)
+        result['data'][0]['embedding'][0] = 2. if 'Text: b' in body['messages'][-1]['content'][0]['text'] else 1.
         return httpx.Response(200, json=result)
     api = client(handle)
     reps = api.encode_representations(['a', 'b'])
@@ -138,3 +138,35 @@ def test_custom_query_template_is_in_identity_and_request():
     api.encode_vis_query('question')
     assert seen[0]['messages'][-1]['content'][0]['text'] == 'Custom question'
     assert api.fingerprint['prompts']['vis_query'] == 'Custom {query}'
+
+
+def test_concurrent_requests_overlap_and_keep_input_order():
+    import json
+    import threading
+    barrier = threading.Barrier(2, timeout=5)
+    def handle(request):
+        text = json.loads(request.content)['messages'][-1]['content'][0]['text']
+        barrier.wait()  # Fails unless two requests are in flight together.
+        result = response()
+        result['data'][0]['embedding'][0] = float(text.split('Text: item')[1][0]) + 1
+        return httpx.Response(200, json=result)
+    reps = client(handle, concurrency=2).encode_representations([f'item{i}' for i in range(4)])
+    assert [rep['dense'][0] for rep in reps] == sorted(rep['dense'][0] for rep in reps)
+
+
+def test_concurrent_failure_fails_whole_call():
+    import json
+    def handle(request):
+        failed = 'Text: bad' in json.loads(request.content)['messages'][-1]['content'][0]['text']
+        return httpx.Response(503) if failed else httpx.Response(200, json=response())
+    with pytest.raises(httpx.HTTPStatusError):
+        client(handle, concurrency=4).encode(['a', 'bad', 'c', 'd'])
+
+
+def test_concurrency_is_transport_not_identity(monkeypatch):
+    fingerprints = dict(model_fingerprint='weights', tokenizer_fingerprint='tok', processor_fingerprint='proc')
+    assert FreeRetAPI(concurrency=1, **fingerprints).index_identity == FreeRetAPI(concurrency=8, **fingerprints).index_identity
+    monkeypatch.setenv('WORLDMM_FREERET_CONCURRENCY', '3')
+    assert FreeRetAPI().concurrency == 3
+    with pytest.raises(ValueError):
+        FreeRetAPI(concurrency=0)
